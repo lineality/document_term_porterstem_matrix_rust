@@ -504,6 +504,17 @@ impl PorterStemmer {
         }
     }
     
+    /// Ensure output directory exists
+    fn ensure_output_dir() -> io::Result<()> {
+        std::fs::create_dir_all("output")?;
+        Ok(())
+    }
+
+    /// Get output path
+    fn get_output_path(filename: &str) -> String {
+        format!("output/{}", filename)
+    }
+    
     
     /// Write stem dictionary to a separate file
     fn write_stem_dictionary(
@@ -512,8 +523,13 @@ impl PorterStemmer {
         dict_path: &str,
     ) -> io::Result<()> {
         let mut dict_file = File::create(dict_path)?;
-        for stem in stems {
+        let mut sorted_stems: Vec<_> = stems.iter().collect();
+        sorted_stems.sort(); // Sort for consistent output
+        
+        println!("Writing {} stems to dictionary: {}", stems.len(), dict_path);
+        for stem in sorted_stems {
             writeln!(dict_file, "{}", stem)?;
+            println!("Wrote stem: {}", stem); // Debug print
         }
         Ok(())
     }
@@ -532,16 +548,23 @@ impl PorterStemmer {
     pub fn noload_process_csvtobow_matrix_streaming(
         &self,
         input_path: &str,
-        output_path: &str,
-        dict_path: &str,
+        output_filename: &str,
+        dict_filename: &str,
         text_column: usize,
         chunk_size: usize,
     ) -> io::Result<()> {
+        println!("Processing CSV file: {}", input_path);  // Debug print
+        
+        Self::ensure_output_dir()?;
+        let output_path = Self::get_output_path(output_filename);
+        let dict_path = Self::get_output_path(dict_filename);
+        
         // First pass: collect stems using streaming
         let unique_stems = self.collect_unique_stems_streaming(input_path, text_column)?;
+        println!("Collected stems: {:?}", unique_stems);  // Debug print
         
         // Write stems dictionary
-        self.write_stem_dictionary(&unique_stems, dict_path)?;
+        self.write_stem_dictionary(&unique_stems, &dict_path)?;
         
         // Convert to ordered Vec
         let stem_vec: Vec<String> = unique_stems.into_iter().collect();
@@ -550,20 +573,20 @@ impl PorterStemmer {
         let input = BufReader::new(File::open(input_path)?);
         let mut output = File::create(output_path)?;
         
-        // Write header
-        let header: String = stem_vec
-            .iter()
-            .map(|stem| format!("stem_{}", stem))
-            .collect::<Vec<_>>()
-            .join(",");
-        writeln!(output, "{}", header)?;
-
-        // Process lines in chunks
+        // Write header - preserve original header and add stem columns
         let mut lines = input.lines();
+        if let Some(header_line) = lines.next() {
+            let original_header = header_line?;
+            let stem_header: String = stem_vec
+                .iter()
+                .map(|stem| format!("stem_{}", stem))
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(output, "{},{}", original_header, stem_header)?;
+        }
+
+        // Process remaining lines in chunks
         let mut buffer = Vec::with_capacity(chunk_size);
-        
-        // Skip header
-        let _ = lines.next();
         
         while let Some(line) = lines.next() {
             let line = line?;
@@ -582,6 +605,66 @@ impl PorterStemmer {
         
         Ok(())
     }
+    // pub fn noload_process_csvtobow_matrix_streaming(
+    //     &self,
+    //     input_path: &str,
+    //     output_filename: &str,
+    //     dict_filename: &str,
+    //     text_column: usize,
+    //     chunk_size: usize,
+    // ) -> io::Result<()> {
+    //     println!("Processing CSV file: {}", input_path);  // Debug print
+        
+    //     Self::ensure_output_dir()?;
+    //     let output_path = Self::get_output_path(output_filename);
+    //     let dict_path = Self::get_output_path(dict_filename);
+        
+    //     // First pass: collect stems using streaming
+    //     let unique_stems = self.collect_unique_stems_streaming(input_path, text_column)?;
+    //     println!("Collected stems: {:?}", unique_stems);  // Debug print
+        
+    //     // Write stems dictionary
+    //     self.write_stem_dictionary(&unique_stems, &dict_path)?;
+        
+    //     // Convert to ordered Vec
+    //     let stem_vec: Vec<String> = unique_stems.into_iter().collect();
+        
+    //     // Second pass: create BOW matrix streaming
+    //     let input = BufReader::new(File::open(input_path)?);
+    //     let mut output = File::create(output_path)?;
+        
+    //     // Write header
+    //     let header: String = stem_vec
+    //         .iter()
+    //         .map(|stem| format!("stem_{}", stem))
+    //         .collect::<Vec<_>>()
+    //         .join(",");
+    //     writeln!(output, "{}", header)?;
+
+    //     // Process lines in chunks
+    //     let mut lines = input.lines();
+    //     let mut buffer = Vec::with_capacity(chunk_size);
+        
+    //     // Skip header
+    //     let _ = lines.next();
+        
+    //     while let Some(line) = lines.next() {
+    //         let line = line?;
+    //         buffer.push(line);
+            
+    //         if buffer.len() >= chunk_size {
+    //             self.process_chunk(&buffer, &stem_vec, text_column, &mut output)?;
+    //             buffer.clear();
+    //         }
+    //     }
+        
+    //     // Process remaining lines
+    //     if !buffer.is_empty() {
+    //         self.process_chunk(&buffer, &stem_vec, text_column, &mut output)?;
+    //     }
+        
+    //     Ok(())
+    // }
 
 
     /// Process a chunk of lines
@@ -810,9 +893,12 @@ impl PorterStemmer {
     pub fn noload_process_filedocument_streaming(
         &self,
         input_path: &str,
-        dict_path: &str,
+        dict_filename: &str,
         chunk_size: usize,
     ) -> io::Result<HashSet<String>> {
+        Self::ensure_output_dir()?;
+        let dict_path = Self::get_output_path(dict_filename);
+        
         let file = File::open(input_path)?;
         let reader = BufReader::new(file);
         let mut unique_stems = HashSet::new();
@@ -847,7 +933,7 @@ impl PorterStemmer {
         }
 
         // Write stem dictionary
-        self.write_stem_dictionary(&unique_stems, dict_path)?;
+        self.write_stem_dictionary(&unique_stems, &dict_path)?;
 
         Ok(unique_stems)
     }
@@ -856,10 +942,14 @@ impl PorterStemmer {
     pub fn noload_process_documentfile_frequencies_streaming(
         &self,
         input_path: &str,
-        dict_path: &str,
-        freq_output_path: &str,
+        dict_filename: &str,
+        freq_filename: &str,
         chunk_size: usize,
     ) -> io::Result<HashMap<String, usize>> {
+        Self::ensure_output_dir()?;
+        let dict_path = Self::get_output_path(dict_filename);
+        let freq_output_path = Self::get_output_path(freq_filename);
+        
         let file = File::open(input_path)?;
         let reader = BufReader::new(file);
         let mut word_frequencies = HashMap::new();
@@ -897,7 +987,7 @@ impl PorterStemmer {
 
         // Write stem dictionary
         let unique_stems: HashSet<String> = word_frequencies.keys().cloned().collect();
-        self.write_stem_dictionary(&unique_stems, dict_path)?;
+        self.write_stem_dictionary(&unique_stems, &dict_path)?;
 
         // Write frequencies to separate file
         let mut freq_file = File::create(freq_output_path)?;
@@ -1659,69 +1749,69 @@ mod tests {
 }  // End of Tests
 
 fn main() -> io::Result<()> {
+    let mut stemmer = PorterStemmer::new();
     
     //////////////////
     // 1. single word
     //////////////////
     print!("1. single word\n");
-    let mut stemmer = PorterStemmer::new();
     let stemmed = stemmer.stem("running");
     println!("stemmed = stemmer.stem('running'): {}\n", stemmed); // Outputs: "run"
     
     ////////////////////////
-    // 2. single doc string
-    ////////////////////////
-    // Process text directly
-    print!("2. single doc string\n");
-    let text = "Running and jumping through the fields!";
-    let stemmed_text = stemmer.process_text(text);
-    println!("Stemmed text results: {:?}\n", stemmed_text);
+    // // 2. single doc string
+    // ////////////////////////
+    // // Process text directly
+    // print!("2. single doc string\n");
+    // let text = "Running and jumping through the fields!";
+    // let stemmed_text = stemmer.process_text(text);
+    // println!("Stemmed text results: {:?}\n", stemmed_text);
 
-    //////////////////////
-    // 3. single doc file
-    //////////////////////
-    print!("3. single doc file\n");
-    let stemmer = PorterStemmer::new();
+    // //////////////////////
+    // // 3. single doc file
+    // //////////////////////
+    // print!("3. single doc file\n");
+    // let stemmer = PorterStemmer::new();
 
-    // Process a document file
-    let stemmed_words = stemmer.process_file_document("file_targets/test.txt")?;
-    println!("-> Stemmed words: {:?}", stemmed_words);
+    // // Process a document file
+    // let stemmed_words = stemmer.process_file_document("file_targets/test.txt")?;
+    // println!("-> Stemmed words: {:?}", stemmed_words);
     
-    // Process with frequency counting
-    let word_frequencies = stemmer.process_documentfile_with_frequencies("file_targets/test.txt")?;
-    println!("-> Word frequencies: {:?}\n", word_frequencies);
+    // // Process with frequency counting
+    // let word_frequencies = stemmer.process_documentfile_with_frequencies("file_targets/test.txt")?;
+    // println!("-> Word frequencies: {:?}\n", word_frequencies);
     
-    print!("3.2 noload single doc file\n");
-    // Process document file with streaming
-    let stems = stemmer.noload_process_filedocument_streaming(
-        "file_targets/test.txt",
-        "file_targets/test_stems.txt",
-        1000, // chunk size
-    )?;
-    println!("-> Unique stems written to test_stems.txt");
-    println!("{:?}", stems);
+    // print!("3.2 noload single doc file\n");
+    // // Process document file with streaming
+    // let stems = stemmer.noload_process_filedocument_streaming(
+    //     "file_targets/test.txt", // input path
+    //     "test_stems.txt",        // output path
+    //     1000, // chunk size
+    // )?;
+    // println!("-> Unique stems written to test_stems.txt");
+    // println!("{:?}", stems);
     
-    // Process with frequency counting
-    let frequencies = stemmer.noload_process_documentfile_frequencies_streaming(
-        "file_targets/test.txt",
-        "file_targets/test_stems.txt",
-        "file_targets/test_frequencies.txt",
-        1000, // chunk size
-    )?;
-    println!("-> Stem frequencies written to test_frequencies.txt\n");
-    println!("{:?}", frequencies);
+    // // Process with frequency counting
+    // let frequencies = stemmer.noload_process_documentfile_frequencies_streaming(
+    //     "file_targets/test.txt", // input path
+    //     "test_stems.txt",        // output path
+    //     "test_frequencies.txt",  // output path
+    //     1000, // chunk size
+    // )?;
+    // println!("-> Stem frequencies written to test_frequencies.txt\n");
+    // println!("{:?}", frequencies);
     
-    ///////////////////
-    // 4.1 csv corpus
-    ///////////////////
-    print!("4.1 csv corpus\n");
-    // Process CSV and create document-term stem matrix
-    stemmer.process_csv_to_bow_matrix(
-        "file_targets/test_csv.csv", // read this input
-        "output_with_bow.csv",       // path to output for results
-        "stem_dictionary.txt",       // stem-dict output
-        0,                           // assuming text is in column 1
-    )?;
+    // ///////////////////
+    // // 4.1 csv corpus
+    // ///////////////////
+    // print!("4.1 csv corpus\n");
+    // // Process CSV and create document-term stem matrix
+    // stemmer.process_csv_to_bow_matrix(
+    //     "file_targets/test_csv.csv", // read this input
+    //     "output_with_bow.csv",       // path to output for results
+    //     "stem_dictionary.txt",       // stem-dict output
+    //     0,                           // assuming text is in column 1
+    // )?;
     
     
     ////////////////////////////////
@@ -1729,16 +1819,20 @@ fn main() -> io::Result<()> {
     ////////////////////////////////
     print!("4.2 extra-noload csv corpus\n");
     // Process with explicit streaming and chunk size
+    // Process with explicit streaming and chunk size
     stemmer.noload_process_csvtobow_matrix_streaming(
-        "file_targets/test_csv.csv",
+        "file_targets/corpus.csv",
         "noload_output_with_bow.csv",
         "noload_stem_dictionary.txt",
-        0,  // text column
-        1000, // process 1000 lines at a time
+        0,  // corpus column is 0
+        1000,
     )?;
     
     // Later, you can read the stem dictionary:
-    let stems = PorterStemmer::read_stem_dictionary("stem_dictionary.txt")?;
+    // Read and display the stems from the output directory
+    let stems = PorterStemmer::read_stem_dictionary(
+        &PorterStemmer::get_output_path("noload_stem_dictionary.txt")
+    )?;
     println!("Stems used in the BOW matrix:");
     for stem in stems {
         println!("{}", stem);
@@ -1748,18 +1842,3 @@ fn main() -> io::Result<()> {
     Ok(())
     
 }
-
-/*
-TODO
-
-BOW Sparse Porter Matrix
-
-1. results output as csv (or some other recommended format)
-2. function to process a .csv as input and output the same
-csv with the "document-term stem matrix" added as one-hot fields.
-
-This should not attempt to load the entire csv, 
-rather read one line at a time, and append one line at a time
-to the results.
-
-*/

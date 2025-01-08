@@ -1,5 +1,5 @@
 [package]
-name = "m_porter_stemmer_rust"
+name = "document_term_porterstem_matrix_rust"
 version = "0.1.0"
 edition = "2021"
 
