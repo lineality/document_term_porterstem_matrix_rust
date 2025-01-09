@@ -503,10 +503,12 @@ use serde::{
     Deserialize,
 };
 use ndarray::{
+    Array1,
     Array2, 
     ArrayView1,
-    // ArrayView2,
-    arr2
+    ArrayView2,
+    arr2,
+    // Zip,
 };
 
 const NLTK_STOPWORDS: [&str; 127] = [
@@ -640,6 +642,278 @@ const NLTK_STOPWORDS: [&str; 127] = [
     ];
 
 
+#[derive(Debug)]
+pub enum LogisticRegressionError {
+    ConvergenceError(String),
+    DimensionMismatch(String),
+    InvalidInput(String),
+}
+
+impl fmt::Display for LogisticRegressionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            LogisticRegressionError::ConvergenceError(msg) => write!(f, "Convergence error: {}", msg),
+            LogisticRegressionError::DimensionMismatch(msg) => write!(f, "Dimension mismatch: {}", msg),
+            LogisticRegressionError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+        }
+    }
+}
+
+impl Error for LogisticRegressionError {}
+
+/// Represents feature importance derived from logistic regression
+#[derive(Debug, Clone)]
+pub struct FeatureImportance {
+    pub feature_index: usize,
+    pub token: String,
+    pub coefficient: f64,
+    pub abs_importance: f64,
+}
+
+/// Logistic Regression model for binary classification
+pub struct LogisticRegression {
+    coefficients: Array1<f64>,
+    intercept: f64,
+    max_iterations: usize,
+    learning_rate: f64,
+    tolerance: f64,
+}
+
+impl LogisticRegression {
+    /// Create a new LogisticRegression instance with default parameters
+    pub fn new() -> Self {
+        LogisticRegression {
+            coefficients: Array1::zeros(0),
+            intercept: 0.0,
+            max_iterations: 1000,
+            learning_rate: 0.1,  // Increased learning rate
+            tolerance: 1e-4,
+        }
+    }
+
+    /// Set maximum iterations for training
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations;
+        self
+    }
+
+    /// Set learning rate for gradient descent
+    pub fn with_learning_rate(mut self, learning_rate: f64) -> Self {
+        self.learning_rate = learning_rate;
+        self
+    }
+
+    /// Sigmoid function with numerical stability
+    fn sigmoid(z: f64) -> f64 {
+        if z > 0.0 {
+            1.0 / (1.0 + (-z).exp())
+        } else {
+            let exp_z = z.exp();
+            exp_z / (1.0 + exp_z)
+        }
+    }
+
+    // /// Fit the model to training data
+    // pub fn fit(
+    //     &mut self,
+    //     x: ArrayView2<f64>,
+    //     y: ArrayView1<f64>,
+    // ) -> Result<(), LogisticRegressionError> {
+    //     // Validate input dimensions
+    //     if x.nrows() != y.len() {
+    //         return Err(LogisticRegressionError::DimensionMismatch(
+    //             "Number of samples in X and y must match".to_string(),
+    //         ));
+    //     }
+
+    //     let n_samples = x.nrows();
+    //     let n_features = x.ncols();
+
+    //     // Initialize coefficients with explicit f64 type
+    //     self.coefficients = Array1::<f64>::zeros(n_features);
+    //     self.intercept = 0.0;
+
+    //     // Gradient descent
+    //     for iteration in 0..self.max_iterations {
+    //         let mut gradient_coeffs: Array1<f64> = Array1::zeros(n_features);
+    //         let mut gradient_intercept = 0.0;
+
+    //         // Calculate predictions and gradients
+    //         for i in 0..n_samples {
+    //             let x_i = x.row(i);
+    //             let y_i = y[i];
+
+    //             let z = x_i.dot(&self.coefficients) + self.intercept;
+    //             let prediction = Self::sigmoid(z);
+    //             let error = prediction - y_i;
+
+    //             // Update gradients
+    //             for j in 0..n_features {
+    //                 gradient_coeffs[j] += x_i[j] * error;
+    //             }
+    //             gradient_intercept += error;
+    //         }
+
+    //         // Update parameters
+    //         let old_coefficients = self.coefficients.clone();
+            
+    //         // Update coefficients
+    //         for j in 0..n_features {
+    //             self.coefficients[j] -= self.learning_rate * gradient_coeffs[j] / n_samples as f64;
+    //         }
+            
+    //         self.intercept -= self.learning_rate * gradient_intercept / n_samples as f64;
+
+    //         // Check convergence
+    //         let coeff_change = (&self.coefficients - &old_coefficients)
+    //             .mapv(|x| x.abs())
+    //             .sum();
+    //         if coeff_change < self.tolerance {
+    //             return Ok(());
+    //         }
+    //     }
+
+    //     Err(LogisticRegressionError::ConvergenceError(
+    //         "Failed to converge within maximum iterations".to_string(),
+    //     ))
+    // }
+
+    /// Fit the model to training data
+    pub fn fit(
+        &mut self,
+        x: ArrayView2<f64>,
+        y: ArrayView1<f64>,
+    ) -> Result<(), LogisticRegressionError> {
+        // Validate input dimensions
+        if x.nrows() != y.len() {
+            return Err(LogisticRegressionError::DimensionMismatch(
+                "Number of samples in X and y must match".to_string(),
+            ));
+        }
+
+        if x.nrows() == 0 || x.ncols() == 0 {
+            return Err(LogisticRegressionError::InvalidInput(
+                "Empty input data".to_string(),
+            ));
+        }
+
+        let n_samples = x.nrows();
+        let n_features = x.ncols();
+
+        // Initialize coefficients with small random values
+        self.coefficients = Array1::<f64>::zeros(n_features);
+        self.intercept = 0.0;
+
+        let mut prev_loss = f64::INFINITY;
+        
+        // Gradient descent
+        for _iteration in 0..self.max_iterations {
+            let mut gradient_coeffs: Array1<f64> = Array1::zeros(n_features);
+            let mut gradient_intercept = 0.0;
+            let mut current_loss = 0.0;
+
+            // Calculate predictions and gradients
+            for i in 0..n_samples {
+                let x_i = x.row(i);
+                let y_i = y[i];
+
+                let z = x_i.dot(&self.coefficients) + self.intercept;
+                let prediction = Self::sigmoid(z);
+                
+                // Calculate loss
+                current_loss -= y_i * prediction.ln() + (1.0 - y_i) * (1.0 - prediction).ln();
+                
+                let error = prediction - y_i;
+
+                // Update gradients
+                for j in 0..n_features {
+                    gradient_coeffs[j] += x_i[j] * error;
+                }
+                gradient_intercept += error;
+            }
+
+            current_loss /= n_samples as f64;
+
+            // Early stopping if loss is increasing
+            if current_loss > prev_loss * 1.5 {
+                return Ok(());
+            }
+            prev_loss = current_loss;
+
+            // Update parameters with normalized gradients
+            for j in 0..n_features {
+                self.coefficients[j] -= self.learning_rate * gradient_coeffs[j] / n_samples as f64;
+            }
+            self.intercept -= self.learning_rate * gradient_intercept / n_samples as f64;
+
+            // Check convergence on loss instead of coefficients
+            if (prev_loss - current_loss).abs() < self.tolerance {
+                return Ok(());
+            }
+        }
+
+        Ok(())  // Return Ok even if max iterations reached
+    }
+    /// Get feature importance scores
+    pub fn get_feature_importance(&self) -> Vec<FeatureImportance> {
+        let mut importance = Vec::with_capacity(self.coefficients.len());
+        
+        for (idx, &coef) in self.coefficients.iter().enumerate() {
+            importance.push(FeatureImportance {
+                feature_index: idx,
+                token: format!("feature_{}", idx),
+                coefficient: coef,
+                abs_importance: coef.abs(),
+            });
+        }
+
+        // Sort by absolute importance in descending order
+        importance.sort_by(|a, b| b.abs_importance.partial_cmp(&a.abs_importance).unwrap());
+        importance
+    }
+}
+
+/// Calculate feature importance using logistic regression
+pub fn calculate_logistic_regression_importance(
+    bow_matrix: &Array2<f64>,
+    labels: &[usize],
+) -> Result<Vec<FeatureImportance>, Box<dyn Error>> {
+    // Convert labels to f64
+    let y: Array1<f64> = Array1::from_iter(labels.iter().map(|&l| l as f64));
+
+    // Create and train model
+    let mut model = LogisticRegression::new()
+        .with_max_iterations(1000)
+        .with_learning_rate(0.01);
+
+    model.fit(bow_matrix.view(), y.view())?;
+
+    // Get feature importance
+    Ok(model.get_feature_importance())
+}
+
+/// Print feature importance results
+pub fn print_feature_importance(
+    importance: &[FeatureImportance],
+    stem_dictionary: Option<&[String]>,
+    top_n: Option<usize>,
+) {
+    let n = top_n.unwrap_or(importance.len());
+    println!("\nTop {} Features by Logistic Regression Importance:", n);
+    println!("{:-<60}", "");
+
+    for (i, feat) in importance.iter().take(n).enumerate() {
+        let stem = stem_dictionary
+            .and_then(|dict| dict.get(feat.feature_index))
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+
+        println!("{}. Token: {} ({})", i + 1, feat.token, stem);
+        println!("   Coefficient: {:.4}", feat.coefficient);
+        println!("   Absolute Importance: {:.4}", feat.abs_importance);
+        println!("{:-<60}", "");
+    }
+}
 
 /// Represents mutual information scores for features
 #[derive(Debug, Clone)]
@@ -2290,6 +2564,72 @@ mod tests {
     use tempfile::NamedTempFile;
     use ndarray::arr2;
 
+   // GLM
+    #[test]
+    fn test_logistic_regression_basic() {
+        let x = arr2(&[
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [0.0, 0.0],
+        ]);
+        let y = Array1::from_vec(vec![1.0, 0.0, 1.0, 0.0]);
+
+        let mut model = LogisticRegression::new()
+            .with_learning_rate(0.1)
+            .with_max_iterations(1000);
+            
+        let result = model.fit(x.view(), y.view());
+        assert!(result.is_ok(), "Failed to fit model: {:?}", result);
+    }
+
+    #[test]
+    fn test_feature_importance() {
+        let bow_matrix = arr2(&[
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]);
+        let labels = vec![0, 1, 0, 1];
+
+        let result = calculate_logistic_regression_importance(&bow_matrix, &labels);
+        assert!(result.is_ok(), "Feature importance calculation failed: {:?}", result);
+
+        if let Ok(importance) = result {
+            assert_eq!(importance.len(), 3, "Expected 3 features");
+            // Check if importance scores are ordered
+            for i in 1..importance.len() {
+                assert!(
+                    importance[i-1].abs_importance >= importance[i].abs_importance,
+                    "Importance scores should be in descending order"
+                );
+            }
+        }
+    }
+
+    // Add more test cases
+    #[test]
+    fn glm_test_empty_input() {
+        let x = arr2(&[[0.0; 0]; 0]);
+        let y = Array1::<f64>::zeros(0);
+        
+        let mut model = LogisticRegression::new();
+        let result = model.fit(x.view(), y.view());
+        assert!(matches!(result, Err(LogisticRegressionError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn glm_test_dimension_mismatch() {
+        let x = arr2(&[[1.0, 0.0], [0.0, 1.0]]);
+        let y = Array1::from_vec(vec![1.0]);  // Wrong length
+        
+        let mut model = LogisticRegression::new();
+        let result = model.fit(x.view(), y.view());
+        assert!(matches!(result, Err(LogisticRegressionError::DimensionMismatch(_))));
+    }
+    
+    
     // mutual_information
     #[test]
     fn test_mutual_information_basic() {
