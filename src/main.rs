@@ -26,7 +26,7 @@
 //! # If you need to read both the stems and the BOW matrix:
 //! import pandas as pd
 //!
-//! # Read stems
+//! # Read stemsensure_output_dira
 //! with open('stem_dictionary.txt', 'r') as f:
 //!     stems = [line.strip() for line in f]
 //!
@@ -465,16 +465,222 @@
 //!    return 0;
 //! }
 
+use std::fs;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
-use rayon::prelude::*;
+use std::io::{
+    self,
+    BufRead,
+    BufReader,
+    Write,
+};
 use std::sync::Arc;
 use std::collections::{
     HashMap,
     HashSet,
 };
 use std::sync::Mutex;
-// use std::path::Path;
+use std::path::Path;
+
+use rayon::prelude::*;
+use serde::{
+    Serialize, 
+    Deserialize,
+};
+
+/// Ensures the directory for a given path exists
+fn ensure_directory_for_path(path: &str) -> io::Result<()> {
+    if let Some(dir) = Path::new(path).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+fn ensure_directories() -> io::Result<()> {
+    fs::create_dir_all("file_targets")?;
+    fs::create_dir_all("output")?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TokenizerDict {
+    stems: HashMap<String, usize>,
+    total_docs: usize,
+}
+
+impl TokenizerDict {
+    fn new() -> Self {
+        TokenizerDict {
+            stems: HashMap::new(),
+            total_docs: 0,
+        }
+    }
+
+    // Add TF-IDF calculation
+    fn calculate_tfidf(&self, term_frequencies: &HashMap<String, usize>) -> HashMap<String, f64> {
+        let mut tfidf = HashMap::new();
+        let doc_count = self.total_docs as f64;
+        
+        for (term, &freq) in term_frequencies.iter() {
+            if let Some(&doc_freq) = self.stems.get(term) {
+                let tf = freq as f64;
+                let idf = (doc_count / (doc_freq as f64 + 1.0)).ln();
+                tfidf.insert(term.clone(), tf * idf);
+            }
+        }
+        tfidf
+    }
+
+    // Add stop word filtering
+    fn filter_stop_words(&mut self, stop_words: &HashSet<String>) {
+        self.stems.retain(|stem, _| !stop_words.contains(stem));
+    }
+
+    /// Save tokenizer dictionary to JSON
+    fn save_to_json(&self, path: &str) -> Result<(), std::io::Error> {
+        let json = serde_json::to_string_pretty(self)?;
+        let mut file = File::create(path)?;
+        file.write_all(json.as_bytes())?;
+        Ok(())
+    }
+
+    /// Load tokenizer dictionary from JSON
+    fn load_from_json(path: &str) -> Result<Self, std::io::Error> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let dict: TokenizerDict = serde_json::from_reader(reader)?;
+        Ok(dict)
+    }
+
+    // /// Second sweep: Create BOW matrix with token frequencies
+    // fn second_sweep(
+    //     &self, 
+    //     input_path: &str, 
+    //     output_path: &str, 
+    //     text_column: usize
+    // ) -> Result<(), std::io::Error> {
+    //     let input_file = File::open(input_path)?;
+    //     let mut output_file = File::create(output_path)?;
+    //     let reader = BufReader::new(input_file);
+    //     let mut stemmer = PorterStemmer::new();
+
+    //     // Write header with stem columns
+    //     let header: String = self.stems.keys()
+    //         .map(|stem| format!("stem_{}_freq", stem))
+    //         .collect::<Vec<_>>()
+    //         .join(",");
+    //     writeln!(output_file, "{}", header)?;
+
+    //     // Skip input header
+    //     let mut lines = reader.lines();
+    //     let _ = lines.next();
+
+    //     for line_result in lines {
+    //         let line = line_result?;
+    //         let fields: Vec<&str> = line.split(',').collect();
+            
+    //         if let Some(text) = fields.get(text_column) {
+    //             let words = PorterStemmer::extract_words(text);
+                
+    //             // Count stem frequencies for this document
+    //             let mut doc_stem_freq = HashMap::new();
+    //             for word in words {
+    //                 let stem = stemmer.stem(&word);
+    //                 *doc_stem_freq.entry(stem).or_insert(0) += 1;
+    //             }
+
+    //             // Write frequencies for each known stem
+    //             let freq_line: String = self.stems.keys()
+    //                 .map(|stem| doc_stem_freq.get(stem).cloned().unwrap_or(0).to_string())
+    //                 .collect::<Vec<_>>()
+    //                 .join(",");
+                
+    //             writeln!(output_file, "{}", freq_line)?;
+    //         }
+    //     }
+
+    //     Ok(())
+    // }
+    
+    
+    // First sweep: Process each row individually
+    fn first_sweep(&mut self, input_path: &str, text_column: usize) -> io::Result<()> {
+        let file = File::open(input_path)?;
+        let reader = BufReader::new(file);
+        let mut stemmer = PorterStemmer::new();
+
+        // Skip header
+        let mut lines = reader.lines();
+        let _ = lines.next();
+
+        // Process each row individually
+        for line_result in lines {
+            let line = line_result?;
+            let fields: Vec<&str> = line.split(',').collect();
+            
+            if let Some(text) = fields.get(text_column) {
+                // Extract and count stems for this document
+                let words = PorterStemmer::extract_words(text);
+                for word in words {
+                    let stem = stemmer.stem(&word);
+                    *self.stems.entry(stem).or_insert(0) += 1;
+                }
+            }
+            
+            self.total_docs += 1;
+        }
+
+        Ok(())
+    }
+
+    // Second sweep: Create BOW matrix using collected stems
+    fn second_sweep(
+        &self, 
+        input_path: &str, 
+        output_path: &str, 
+        text_column: usize
+    ) -> io::Result<()> {
+        let input_file = File::open(input_path)?;
+        let mut output_file = File::create(output_path)?;
+        let reader = BufReader::new(input_file);
+        let mut stemmer = PorterStemmer::new();
+
+        // Write header with all known stems
+        let header: String = self.stems.keys()
+            .map(|stem| format!("stem_{}_freq", stem))
+            .collect::<Vec<_>>()
+            .join(",");
+        writeln!(output_file, "{}", header)?;
+
+        // Process each document
+        let mut lines = reader.lines();
+        let _ = lines.next(); // Skip header
+
+        for line_result in lines {
+            let line = line_result?;
+            let fields: Vec<&str> = line.split(',').collect();
+            
+            if let Some(text) = fields.get(text_column) {
+                // Count stems in this document
+                let mut doc_stem_freq = HashMap::new();
+                let words = PorterStemmer::extract_words(text);
+                for word in words {
+                    let stem = stemmer.stem(&word);
+                    *doc_stem_freq.entry(stem).or_insert(0) += 1;
+                }
+
+                // Write frequencies for all known stems
+                let freq_line: String = self.stems.keys()
+                    .map(|stem| doc_stem_freq.get(stem).cloned().unwrap_or(0).to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                
+                writeln!(output_file, "{}", freq_line)?;
+            }
+        }
+
+        Ok(())
+    }    
+}
 
 /// Porter Stemmer struct that maintains the state during stemming operations
 #[derive(Debug)]
@@ -488,7 +694,6 @@ pub struct PorterStemmer {
     /// General offset used in various operations
     j: usize,
 }
-
 
 impl PorterStemmer {
     /// Creates a new Porter Stemmer instance
@@ -504,25 +709,17 @@ impl PorterStemmer {
         }
     }
     
-    /// Ensure output directory exists
-    fn ensure_output_dir() -> io::Result<()> {
-        std::fs::create_dir_all("output")?;
-        Ok(())
-    }
 
-    /// Get output path
-    fn get_output_path(filename: &str) -> String {
-        format!("output/{}", filename)
-    }
-    
-    
+
     /// Write stem dictionary to a separate file
     fn write_stem_dictionary(
         &self,
         stems: &HashSet<String>,
-        dict_path: &str,
+        dict_path: &str,  // Full path
     ) -> io::Result<()> {
+        ensure_directory_for_path(dict_path)?;
         let mut dict_file = File::create(dict_path)?;
+
         let mut sorted_stems: Vec<_> = stems.iter().collect();
         sorted_stems.sort(); // Sort for consistent output
         
@@ -548,16 +745,14 @@ impl PorterStemmer {
     pub fn noload_process_csvtobow_matrix_streaming(
         &self,
         input_path: &str,
-        output_filename: &str,
-        dict_filename: &str,
+        output_path: &str, // Full path
+        dict_path: &str,   // Full path
         text_column: usize,
         chunk_size: usize,
     ) -> io::Result<()> {
-        println!("Processing CSV file: {}", input_path);  // Debug print
-        
-        Self::ensure_output_dir()?;
-        let output_path = Self::get_output_path(output_filename);
-        let dict_path = Self::get_output_path(dict_filename);
+        // Ensure output directories exist
+        ensure_directory_for_path(output_path)?;
+        ensure_directory_for_path(dict_path)?;
         
         // First pass: collect stems using streaming
         let unique_stems = self.collect_unique_stems_streaming(input_path, text_column)?;
@@ -750,6 +945,10 @@ impl PorterStemmer {
         dict_path: &str,
         text_column: usize,
     ) -> io::Result<()> {
+        // Ensure output directories exist
+        ensure_directory_for_path(output_path)?;
+        ensure_directory_for_path(dict_path)?;
+        
         // First pass: collect unique stems
         let unique_stems = self.collect_unique_stems(input_path, text_column)?;
         
@@ -893,11 +1092,11 @@ impl PorterStemmer {
     pub fn noload_process_filedocument_streaming(
         &self,
         input_path: &str,
-        dict_filename: &str,
+        output_dict_path: &str,
         chunk_size: usize,
     ) -> io::Result<HashSet<String>> {
-        Self::ensure_output_dir()?;
-        let dict_path = Self::get_output_path(dict_filename);
+        
+        ensure_directory_for_path(output_dict_path)?;
         
         let file = File::open(input_path)?;
         let reader = BufReader::new(file);
@@ -933,7 +1132,7 @@ impl PorterStemmer {
         }
 
         // Write stem dictionary
-        self.write_stem_dictionary(&unique_stems, &dict_path)?;
+        self.write_stem_dictionary(&unique_stems, &output_dict_path)?;
 
         Ok(unique_stems)
     }
@@ -942,13 +1141,14 @@ impl PorterStemmer {
     pub fn noload_process_documentfile_frequencies_streaming(
         &self,
         input_path: &str,
-        dict_filename: &str,
-        freq_filename: &str,
+        output_dict_path: &str,
+        output_freq_path: &str,
         chunk_size: usize,
     ) -> io::Result<HashMap<String, usize>> {
-        Self::ensure_output_dir()?;
-        let dict_path = Self::get_output_path(dict_filename);
-        let freq_output_path = Self::get_output_path(freq_filename);
+        
+        ensure_directory_for_path(input_path)?;
+        ensure_directory_for_path(output_dict_path)?;
+        ensure_directory_for_path(output_freq_path)?;
         
         let file = File::open(input_path)?;
         let reader = BufReader::new(file);
@@ -987,10 +1187,10 @@ impl PorterStemmer {
 
         // Write stem dictionary
         let unique_stems: HashSet<String> = word_frequencies.keys().cloned().collect();
-        self.write_stem_dictionary(&unique_stems, &dict_path)?;
+        self.write_stem_dictionary(&unique_stems, &output_dict_path)?;
 
         // Write frequencies to separate file
-        let mut freq_file = File::create(freq_output_path)?;
+        let mut freq_file = File::create(output_freq_path)?;
         for (stem, freq) in &word_frequencies {
             writeln!(freq_file, "{},{}", stem, freq)?;
         }
@@ -1708,10 +1908,11 @@ mod tests {
 
     #[test]
     fn test_noload_csv_and_dictionary_processing() -> io::Result<()> {
-        // Create temporary files
+        // Create temporary files with proper scope
+        let temp_dir = tempfile::tempdir()?;
         let input_file = NamedTempFile::new()?;
-        let output_file = NamedTempFile::new()?;
-        let dict_file = NamedTempFile::new()?;
+        let output_path = temp_dir.path().join("output.csv");
+        let dict_path = temp_dir.path().join("dict.txt");
         
         // Write test data
         write!(
@@ -1725,40 +1926,44 @@ mod tests {
         let stemmer = PorterStemmer::new();
         stemmer.noload_process_csvtobow_matrix_streaming(
             input_file.path().to_str().unwrap(),
-            output_file.path().to_str().unwrap(),
-            dict_file.path().to_str().unwrap(),
-            1,  // text is in column 1, not 0
+            output_path.to_str().unwrap(),
+            dict_path.to_str().unwrap(),
+            1,
             10,
         )?;
 
         // Verify dictionary
-        let stems = PorterStemmer::read_stem_dictionary(dict_file.path().to_str().unwrap())?;
-        println!("Stems in dictionary: {:?}", stems);  // Debug print
+        let stems = PorterStemmer::read_stem_dictionary(dict_path.to_str().unwrap())?;
+        println!("Stems in dictionary: {:?}", stems);
         assert!(stems.contains(&"run".to_string()));
         assert!(stems.contains(&"jump".to_string()));
         
         // Verify BOW matrix
-        let reader = BufReader::new(File::open(output_file.path())?);
+        let reader = BufReader::new(File::open(&output_path)?);
         let lines: Vec<String> = reader.lines().collect::<Result<_, _>>()?;
-        println!("Output lines: {:?}", lines);  // Debug print
+        println!("Output lines: {:?}", lines);
         assert!(!lines.is_empty());
-        assert!(!lines[0].ends_with(','));  // No extra comma
+        assert!(!lines[0].ends_with(','));
         
         Ok(())
     }
+    
 }  // End of Tests
 
 fn main() -> io::Result<()> {
+    // Ensure directories exist
+    ensure_directories()?;
+    
     let mut stemmer = PorterStemmer::new();
     
-    //////////////////
-    // 1. single word
-    //////////////////
-    print!("1. single word\n");
-    let stemmed = stemmer.stem("running");
-    println!("stemmed = stemmer.stem('running'): {}\n", stemmed); // Outputs: "run"
+    // //////////////////
+    // // 1. single word
+    // //////////////////
+    // print!("1. single word\n");
+    // let stemmed = stemmer.stem("running");
+    // println!("stemmed = stemmer.stem('running'): {}\n", stemmed); // Outputs: "run"
     
-    ////////////////////////
+    // //////////////////////
     // // 2. single doc string
     // ////////////////////////
     // // Process text directly
@@ -1785,7 +1990,7 @@ fn main() -> io::Result<()> {
     // // Process document file with streaming
     // let stems = stemmer.noload_process_filedocument_streaming(
     //     "file_targets/test.txt", // input path
-    //     "test_stems.txt",        // output path
+    //     "output/test_stems.txt",        // output path
     //     1000, // chunk size
     // )?;
     // println!("-> Unique stems written to test_stems.txt");
@@ -1794,8 +1999,8 @@ fn main() -> io::Result<()> {
     // // Process with frequency counting
     // let frequencies = stemmer.noload_process_documentfile_frequencies_streaming(
     //     "file_targets/test.txt", // input path
-    //     "test_stems.txt",        // output path
-    //     "test_frequencies.txt",  // output path
+    //     "output/test_stems.txt",        // output path
+    //     "output/test_frequencies.txt",  // output path
     //     1000, // chunk size
     // )?;
     // println!("-> Stem frequencies written to test_frequencies.txt\n");
@@ -1808,37 +2013,102 @@ fn main() -> io::Result<()> {
     // // Process CSV and create document-term stem matrix
     // stemmer.process_csv_to_bow_matrix(
     //     "file_targets/test_csv.csv", // read this input
-    //     "output_with_bow.csv",       // path to output for results
-    //     "stem_dictionary.txt",       // stem-dict output
+    //     "output/output_with_bow.csv",       // path to output for results
+    //     "output/stem_dictionary.txt",       // stem-dict output
     //     0,                           // assuming text is in column 1
     // )?;
     
     
-    ////////////////////////////////
-    // 4.2 extra-noload csv corpus
-    ////////////////////////////////
-    print!("4.2 extra-noload csv corpus\n");
-    // Process with explicit streaming and chunk size
-    // Process with explicit streaming and chunk size
-    stemmer.noload_process_csvtobow_matrix_streaming(
-        "file_targets/corpus.csv",
-        "noload_output_with_bow.csv",
-        "noload_stem_dictionary.txt",
-        0,  // corpus column is 0
-        1000,
-    )?;
+    // //////////////////////////////
+    // // 4.2 extra-noload csv corpus
+    // //////////////////////////////
+    // print!("4.2 extra-noload csv corpus\n");
+    // // Process with explicit streaming and chunk size
+    // // Process with explicit streaming and chunk size
+    // stemmer.noload_process_csvtobow_matrix_streaming(
+    //     "file_targets/corpus.csv",
+    //     "output/noload_output_with_bow.csv",
+    //     "output/noload_stem_dictionary.txt",
+    //     0,  // corpus text column index
+    //     1000,
+    // )?;
     
-    // Later, you can read the stem dictionary:
+    
+    ////////////////////////////////
+    // 5. Two Phase .csv ~tokenizer
+    ////////////////////////////////
+    let input_path = "file_targets/corpus.csv";
+    let tokenizer_dict_path = "output/tokenizer_dict.json";
+    let bow_matrix_path = "output/bow_matrix.csv";
+
+    // First sweep: Collect stems
+    let mut tokenizer_dict = TokenizerDict::new();
+    tokenizer_dict.first_sweep(
+        input_path, // input_path
+        0, // corpus text column index
+        )?;
+    
+    // Save tokenizer dictionary
+    tokenizer_dict.save_to_json(tokenizer_dict_path)?;
+
+    // Optional: Load dictionary (demonstrating persistence)
+    let loaded_dict = TokenizerDict::load_from_json(tokenizer_dict_path)?;
+
+    // Second sweep: Create BOW matrix
+    loaded_dict.second_sweep(
+        input_path, // input path
+        bow_matrix_path, // output path
+        0, // corpus text column index
+    )?;
+
+    // optional / inspection
+    // read the stem dictionary:
     // Read and display the stems from the output directory
     let stems = PorterStemmer::read_stem_dictionary(
-        &PorterStemmer::get_output_path("noload_stem_dictionary.txt")
+        "output/noload_stem_dictionary.txt", // output path
     )?;
     println!("Stems used in the BOW matrix:");
     for stem in stems {
         println!("{}", stem);
     }
     
-    
     Ok(())
     
 }
+
+/*
+byte_tokenizer_rust
+
+switching to simplar output path system
+
+check overall basic workflow:
+as the total list of stem-tokens exits not in each row 
+but ocross all rows,
+but, rows are read in chunks without loading the whole dataset.
+
+Two Sweep Workflow:
+1. start an emtpy tokenizer lookup dict
+2. start 1st sweep: collect stem-tokens
+3. (1st sweep) load a row(or chunk of rows)
+4. (1st sweep) process one row
+5. (1st sweep) add each stem-token from each row to the lookup dict
+6. (1st sweep) at end of 1st sweep through all rows, save tokenizer dict as file (json)/(jsonl?)
+7. start 2nd sweep: add csv rows with counts
+8. (2nd sweep) iterate though all rows again
+9. (2nd sweep) add all token collumns to each row
+10. (2nd sweep) add value count for each token colum to each rown
+
+
+Potential future items:
+- Add TF-IDF calculation
+- Support for more advanced tokenization
+- Configurable stop word removal
+- Parallel processing of large datasets
+
+
+errors:
+ error of unknown origin from cargo run:
+Error: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+ 
+
+*/ 
