@@ -478,7 +478,7 @@
 //!    free(s);
 //!    return 0;
 //! }
-
+use std::f64::EPSILON;
 use std::fs;
 use std::fs::File;
 use std::io::{
@@ -494,11 +494,19 @@ use std::collections::{
 };
 use std::sync::Mutex;
 use std::path::Path;
+use std::error::Error;
+use std::fmt;
 
 use rayon::prelude::*;
 use serde::{
     Serialize, 
     Deserialize,
+};
+use ndarray::{
+    Array2, 
+    ArrayView1,
+    // ArrayView2,
+    arr2
 };
 
 const NLTK_STOPWORDS: [&str; 127] = [
@@ -631,6 +639,160 @@ const NLTK_STOPWORDS: [&str; 127] = [
     "now",
     ];
 
+
+
+/// Represents mutual information scores for features
+#[derive(Debug, Clone)]
+pub struct MutualInformationScore {
+    pub feature_index: usize,
+    pub token: String,
+    pub mi_score: f64,
+    pub class_distributions: Vec<f64>,
+}
+
+/// Calculates mutual information between features and class labels
+pub fn calculate_mutual_information(
+    bow_matrix: &Array2<f64>,
+    labels: &[usize],
+) -> Result<Vec<MutualInformationScore>, FeatureSelectionError> {  // Changed return type
+    // Validate input dimensions
+    if bow_matrix.nrows() != labels.len() {
+        return Err(FeatureSelectionError::DimensionMismatch);
+    }
+    
+    if bow_matrix.is_empty() || labels.is_empty() {
+        return Err(FeatureSelectionError::EmptyInput);
+    }
+
+    // Calculate number of classes and features
+    let num_features = bow_matrix.ncols();
+    let num_samples = bow_matrix.nrows();
+    let num_classes = labels.iter().max().unwrap_or(&0) + 1;
+
+    let mut mi_scores = Vec::with_capacity(num_features);
+
+    // Process each feature
+    for feature_idx in 0..num_features {
+        let feature_column = bow_matrix.column(feature_idx);
+        
+        // Calculate joint probability distribution P(X,Y)
+        let joint_dist = calculate_joint_distribution(
+            feature_column.view(),
+            labels,
+            num_classes,
+            num_samples,
+        );
+
+        // Calculate marginal probabilities
+        let class_marginals = calculate_class_marginals(&joint_dist);
+        let feature_marginals = calculate_feature_marginals(&joint_dist);
+
+        // Calculate mutual information
+        let mi = calculate_mi_score(
+            &joint_dist,
+            &class_marginals,
+            &feature_marginals,
+            num_classes,
+        );
+
+        mi_scores.push(MutualInformationScore {
+            feature_index: feature_idx,
+            token: format!("feature_{}", feature_idx),
+            mi_score: mi,
+            class_distributions: class_marginals,
+        });
+    }
+
+    // Sort by mutual information score in descending order
+    mi_scores.sort_by(|a, b| b.mi_score.partial_cmp(&a.mi_score).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(mi_scores)
+}
+
+/// Calculates joint probability distribution
+fn calculate_joint_distribution(
+    feature_column: ArrayView1<f64>,
+    labels: &[usize],
+    num_classes: usize,
+    num_samples: usize,
+) -> Array2<f64> {
+    let mut joint_dist = Array2::zeros((num_classes, 2));
+
+    for (idx, &feature_value) in feature_column.iter().enumerate() {
+        let class = labels[idx];
+        let bin = if feature_value > 0.0 { 1 } else { 0 };
+        joint_dist[[class, bin]] += 1.0;
+    }
+
+    // Normalize to get probabilities
+    joint_dist.mapv_inplace(|x| x / num_samples as f64);
+    joint_dist
+}
+
+/// Calculates marginal probabilities for classes
+fn calculate_class_marginals(joint_dist: &Array2<f64>) -> Vec<f64> {
+    joint_dist.rows()
+        .into_iter()
+        .map(|row| row.sum())
+        .collect()
+}
+
+/// Calculates marginal probabilities for features
+fn calculate_feature_marginals(joint_dist: &Array2<f64>) -> Vec<f64> {
+    joint_dist.columns()
+        .into_iter()
+        .map(|col| col.sum())
+        .collect()
+}
+
+/// Calculates mutual information score
+fn calculate_mi_score(
+    joint_dist: &Array2<f64>,
+    class_marginals: &[f64],
+    feature_marginals: &[f64],
+    num_classes: usize,
+) -> f64 {
+    let mut mi = 0.0;
+
+    for c in 0..num_classes {
+        for bin in 0..2 {
+            let joint = joint_dist[[c, bin]];
+            if joint > EPSILON {
+                let expected = class_marginals[c] * feature_marginals[bin];
+                if expected > EPSILON {
+                    mi += joint * (joint / expected).ln();
+                }
+            }
+        }
+    }
+
+    mi
+}
+
+/// Prints feature importance based on mutual information scores
+pub fn print_mi_feature_importance(
+    mi_scores: &[MutualInformationScore],
+    stem_dictionary: Option<&[String]>,
+    top_n: Option<usize>,
+) {
+    let n = top_n.unwrap_or(mi_scores.len());
+    println!("\nTop {} Features by Mutual Information:", n);
+    println!("{:-<60}", "");
+
+    for (i, score) in mi_scores.iter().take(n).enumerate() {
+        let stem = stem_dictionary
+            .and_then(|dict| dict.get(score.feature_index))
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+
+        println!("{}. Token: {} ({})", i + 1, score.token, stem);
+        println!("   MI Score: {:.4}", score.mi_score);
+        println!("   Class Distribution: {:?}", score.class_distributions);
+        println!("{:-<60}", "");
+    }
+}
+
+
 /// Ensures the directory for a given path exists
 fn ensure_directory_for_path(path: &str) -> io::Result<()> {
     if let Some(dir) = Path::new(path).parent() {
@@ -643,6 +805,185 @@ fn ensure_directories() -> io::Result<()> {
     fs::create_dir_all("file_targets")?;
     fs::create_dir_all("output")?;
     Ok(())
+}
+
+
+
+/// Custom error type for feature selection operations
+#[derive(Debug)]
+pub enum FeatureSelectionError {
+    EmptyInput,
+    DimensionMismatch,
+    InvalidLabels,
+    ComputationError(String),
+}
+
+// Add this implementation after the FeatureSelectionError definition
+impl From<FeatureSelectionError> for std::io::Error {
+    fn from(error: FeatureSelectionError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::Other, error.to_string())
+    }
+}
+
+impl fmt::Display for FeatureSelectionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            FeatureSelectionError::EmptyInput => write!(f, "Empty input data"),
+            FeatureSelectionError::DimensionMismatch => write!(f, "Dimension mismatch between features and labels"),
+            FeatureSelectionError::InvalidLabels => write!(f, "Invalid labels detected"),
+            FeatureSelectionError::ComputationError(msg) => write!(f, "Computation error: {}", msg),
+        }
+    }
+}
+
+impl Error for FeatureSelectionError {}
+
+/// Represents the correlation statistics for a single feature
+#[derive(Debug, Clone)]
+pub struct FeatureCorrelation {
+    pub token: String,
+    pub chi_square_value: f64,
+    pub p_value: f64,
+    pub degrees_of_freedom: usize,
+}
+
+/// Creates a contingency table for chi-square calculation
+fn create_contingency_table(
+    feature_column: ArrayView1<f64>,
+    labels: &[usize],
+    num_classes: usize,
+) -> Result<Array2<f64>, FeatureSelectionError> {
+    // Initialize 2x2 contingency table for each class
+    let mut table = Array2::zeros((2, num_classes));
+    
+    for (feat_val, &label) in feature_column.iter().zip(labels) {
+        if label >= num_classes {
+            return Err(FeatureSelectionError::InvalidLabels);
+        }
+        
+        let row = if *feat_val > 0.0 { 1 } else { 0 };
+        table[[row, label]] += 1.0;
+    }
+    
+    Ok(table)
+}
+
+/// Calculates chi-square statistic from contingency table
+fn calculate_chi_square(table: &Array2<f64>) -> Result<f64, FeatureSelectionError> {
+    let total: f64 = table.sum();
+    if total == 0.0 {
+        return Err(FeatureSelectionError::ComputationError(
+            "Empty contingency table".to_string()
+        ));
+    }
+
+    let row_sums = table.sum_axis(ndarray::Axis(1));
+    let col_sums = table.sum_axis(ndarray::Axis(0));
+    
+    let mut chi_square = 0.0;
+    
+    for i in 0..table.nrows() {
+        for j in 0..table.ncols() {
+            let observed = table[[i, j]];
+            let expected = (row_sums[i] * col_sums[j]) / total;
+            
+            if expected > 0.0 {
+                chi_square += (observed - expected).powi(2) / expected;
+            }
+        }
+    }
+    
+    Ok(chi_square)
+}
+
+/// Calculates p-value from chi-square statistic and degrees of freedom
+fn calculate_p_value(chi_square: f64, _df: usize) -> f64 {
+    // Simple p-value approximation
+    // Added underscore to df to silence unused variable warning
+    (-0.5 * chi_square).exp()
+}
+
+/// Performs chi-square feature selection on the given BOW matrix
+pub fn chi_square_feature_selection(
+    bow_matrix: &Array2<f64>,
+    labels: &[usize],
+    significance_threshold: f64,
+) -> Result<Vec<FeatureCorrelation>, FeatureSelectionError> {
+    // Input validation
+    if bow_matrix.is_empty() || labels.is_empty() {
+        return Err(FeatureSelectionError::EmptyInput);
+    }
+    
+    if bow_matrix.nrows() != labels.len() {
+        return Err(FeatureSelectionError::DimensionMismatch);
+    }
+    
+    // Find number of unique classes
+    let num_classes = labels.iter()
+        .max()
+        .map(|&max| max + 1)
+        .ok_or(FeatureSelectionError::InvalidLabels)?;
+    
+    let mut correlations = Vec::new();
+    
+    // Process each feature
+    for feature_idx in 0..bow_matrix.ncols() {
+        let feature_column = bow_matrix.column(feature_idx);
+        
+        // Create and analyze contingency table
+        let contingency = create_contingency_table(feature_column, labels, num_classes)?;
+        let chi_square = calculate_chi_square(&contingency)?;
+        
+        // Calculate degrees of freedom
+        let df = (contingency.nrows() - 1) * (contingency.ncols() - 1);
+        let p_value = calculate_p_value(chi_square, df);
+        
+        correlations.push(FeatureCorrelation {
+            token: format!("feature_{}", feature_idx),
+            chi_square_value: chi_square,
+            p_value,
+            degrees_of_freedom: df,
+        });
+    }
+    
+    // Sort by chi-square value in descending order
+    correlations.sort_by(|a, b| b.chi_square_value.partial_cmp(&a.chi_square_value)
+        .unwrap_or(std::cmp::Ordering::Equal));
+    
+    // Filter by significance threshold
+    Ok(correlations.into_iter()
+        .filter(|c| c.p_value <= significance_threshold)
+        .collect())
+}
+
+/// Helper function to print feature correlation results
+pub fn print_feature_correlations(
+    correlations: &[FeatureCorrelation],
+    top_n: Option<usize>,
+    stem_dictionary: Option<&[String]>,
+) {
+    let correlations_to_show = top_n.unwrap_or(correlations.len());
+    
+    println!("\nTop {} Feature Correlations:", correlations_to_show);
+    println!("{:-<60}", "");
+    
+    for (i, correlation) in correlations.iter().take(correlations_to_show).enumerate() {
+        let token_index = correlation.token
+            .split('_')
+            .nth(1)
+            .and_then(|s| s.parse::<usize>().ok());
+        
+        let stem = token_index
+            .and_then(|idx| stem_dictionary.and_then(|dict| dict.get(idx)))
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+        
+        println!("{}. Token: {} ({})", i + 1, correlation.token, stem);
+        println!("   Chi-Square Value: {:.4}", correlation.chi_square_value);
+        println!("   P-Value: {:.4}", correlation.p_value);
+        println!("   Degrees of Freedom: {}", correlation.degrees_of_freedom);
+        println!("{:-<60}", "");
+    }
 }
 
 #[derive(Debug)]
@@ -1947,8 +2288,151 @@ mod tests {
     use super::*;
     use std::fs::write;
     use tempfile::NamedTempFile;
-    // use super::*;
+    use ndarray::arr2;
 
+    // mutual_information
+    #[test]
+    fn test_mutual_information_basic() {
+        let bow_matrix = arr2(&[
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ]);
+        let labels = vec![0, 0, 1, 1];
+
+        let result = calculate_mutual_information(&bow_matrix, &labels);
+        assert!(result.is_ok());
+
+        let scores = result.unwrap();
+        assert!(!scores.is_empty());
+        assert!(scores[0].mi_score >= 0.0);
+    }
+
+    #[test]
+    fn test_mutual_information_empty_input() {
+        let bow_matrix = Array2::<f64>::zeros((0, 0));
+        let labels = vec![];
+
+        let result = calculate_mutual_information(&bow_matrix, &labels);
+        assert!(matches!(result, Err(FeatureSelectionError::EmptyInput)));
+    }
+
+    #[test]
+    fn test_mutual_information_dimension_mismatch() {
+        let bow_matrix = arr2(&[[1.0, 0.0], [0.0, 1.0]]);
+        let labels = vec![0, 1, 2];  // More labels than rows
+
+        let result = calculate_mutual_information(&bow_matrix, &labels);
+        assert!(matches!(result, Err(FeatureSelectionError::DimensionMismatch)));
+    }
+
+    #[test]
+    fn test_perfect_correlation() {
+        let bow_matrix = arr2(&[
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ]);
+        let labels = vec![0, 0, 1, 1];
+
+        let result = calculate_mutual_information(&bow_matrix, &labels).unwrap();
+        
+        // Perfect correlation should have higher MI score
+        assert!(result[0].mi_score > 0.5);
+    }    
+    
+    #[test]
+    fn test_chi_square_basic() {
+        // Create a more distinctive pattern in test data
+        let bow_matrix = arr2(&[
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+        ]);
+        // Labels that clearly correlate with the features
+        let labels = vec![0, 0, 1, 1, 0, 1];
+        
+        let result = chi_square_feature_selection(&bow_matrix, &labels, 0.05);
+        assert!(result.is_ok(), "Chi-square calculation failed");
+        
+        let correlations = result.unwrap();
+        assert!(!correlations.is_empty(), "No significant correlations found");
+        
+        // Additional assertions to verify the results
+        if let Some(first_correlation) = correlations.first() {
+            assert!(
+                first_correlation.chi_square_value > 0.0,
+                "Chi-square value should be positive"
+            );
+            assert!(
+                first_correlation.p_value <= 0.05,
+                "P-value should be below significance threshold"
+            );
+        }
+    }
+
+    // Add a new test for threshold behavior
+    #[test]
+    fn test_chi_square_threshold() {
+        let bow_matrix = arr2(&[
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]);
+        let labels = vec![0, 1, 0, 1];
+        
+        // Test with different thresholds
+        let strict_result = chi_square_feature_selection(&bow_matrix, &labels, 0.01);
+        let lenient_result = chi_square_feature_selection(&bow_matrix, &labels, 0.5);
+        
+        assert!(strict_result.is_ok());
+        assert!(lenient_result.is_ok());
+        
+        let strict_correlations = strict_result.unwrap();
+        let lenient_correlations = lenient_result.unwrap();
+        
+        // Lenient threshold should include more or equal features than strict
+        assert!(lenient_correlations.len() >= strict_correlations.len());
+    }
+
+    // Add a test for the p-value calculation
+    #[test]
+    fn test_p_value_calculation() {
+        let chi_square = 10.0;
+        let df = 1;
+        let p_value = calculate_p_value(chi_square, df);
+        
+        assert!(p_value > 0.0 && p_value < 1.0, "P-value should be between 0 and 1");
+        
+        // Test that larger chi-square values result in smaller p-values
+        let larger_chi_square = 20.0;
+        let larger_p_value = calculate_p_value(larger_chi_square, df);
+        assert!(larger_p_value < p_value, "Larger chi-square should give smaller p-value");
+    }
+    #[test]
+    fn test_empty_input() {
+        let bow_matrix = Array2::<f64>::zeros((0, 0));
+        let labels = vec![];
+        
+        let result = chi_square_feature_selection(&bow_matrix, &labels, 0.05);
+        assert!(matches!(result, Err(FeatureSelectionError::EmptyInput)));
+    }
+
+    #[test]
+    fn test_dimension_mismatch() {
+        let bow_matrix = arr2(&[[1.0, 0.0], [0.0, 1.0]]);
+        let labels = vec![0, 1, 2];  // More labels than rows
+        
+        let result = chi_square_feature_selection(&bow_matrix, &labels, 0.05);
+        assert!(matches!(result, Err(FeatureSelectionError::DimensionMismatch)));
+    }
+    
     #[test]
     fn test_basic_stemming() {
         let mut stemmer = PorterStemmer::new();
@@ -2174,6 +2658,10 @@ mod tests {
         Ok(())
     }
     
+    
+    
+    
+    
 }  // End of Tests
 
 fn main() -> io::Result<()> {
@@ -2370,32 +2858,68 @@ fn main() -> io::Result<()> {
         println!("{}", stem);
     }
     
+    
+    ////////////////
+    // Stat Quest!!
+    ////////////////
+    // Example data
+    let bow_matrix = arr2(&[
+        [1.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]);
+    let labels = vec![0, 1, 0, 1];
+    let stem_dictionary = vec![
+        "first".to_string(),
+        "second".to_string(),
+        "third".to_string(),
+    ];
+
+    // Perform feature selection
+    let correlations = chi_square_feature_selection(&bow_matrix, &labels, 0.05)?;
+
+    // Print results
+    print_feature_correlations(&correlations, Some(3), Some(&stem_dictionary));
+
+    // Original stemmer code...
+    let mut stemmer = PorterStemmer::new();
+    let stemmed = stemmer.stem("running");
+    println!("stemmed = stemmer.stem('running'): {}\n", stemmed);
+
+
+    //////////////////////
+    // mutual_information
+    //////////////////////
+    let bow_matrix = arr2(&[
+        [1.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]);
+    let labels = vec![0, 1, 0, 1];
+    let stem_dictionary = vec![
+        "first".to_string(),
+        "second".to_string(),
+        "third".to_string(),
+    ];
+
+    // Calculate mutual information
+    let mi_scores = calculate_mutual_information(&bow_matrix, &labels)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    // Print results
+    print_mi_feature_importance(&mi_scores, Some(&stem_dictionary), Some(3));
+
+    
+    
+    
     Ok(())
     
 }
 
 /*
 byte_tokenizer_rust
-
-switching to simplar output path system
-
-check overall basic workflow:
-as the total list of stem-tokens exits not in each row 
-but ocross all rows,
-but, rows are read one at a time without loading the whole dataset.
-
-Two Sweep Workflow:
-1. start an emtpy tokenizer lookup dict
-2. start 1st sweep: collect stem-tokens
-3. (1st sweep) load a row(or chunk of rows)
-4. (1st sweep) process one row
-5. (1st sweep) add each stem-token from each row to the lookup dict
-6. (1st sweep) at end of 1st sweep through all rows, save tokenizer dict as file (json)/(jsonl?)
-7. start 2nd sweep: add csv rows with counts
-8. (2nd sweep) iterate though all rows again
-9. (2nd sweep) add all token collumns to each row
-10. (2nd sweep) add value count for each token colum to each rown
-11. save resulting .csv all old and new values as labeled_FILENAME.csv
 
 Potential future items:
 - Add TF-IDF calculation (in progress)
@@ -2404,15 +2928,12 @@ Potential future items:
 - Parallel processing of large datasets
 - optional lematizer perhaps from NLTK or other open-source
 
-A frequency count lookup dictionary is...theoretically useful,
-what a tokenizer lookup dictionary.
-
 what format is best (or good enough) for efficient storing the list of stem-tokens
 to be reloaded to populate the csv file?
 
 next step / TODO:
 - remove unwrap or any code not safe for production use
 - make all error messages clear: identify the function producing the error
-- 
+- check that stopwords can be enabled for multi-document processing
 
 */ 
