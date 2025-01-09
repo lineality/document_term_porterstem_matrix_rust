@@ -716,12 +716,12 @@ impl MultiFileProcessor {
 }
 
 
-#[derive(Debug)]
-struct TokenizerConfig {
-    remove_stopwords: bool,
-    text_column: usize,
-    // Add other configuration options as needed
-}
+// #[derive(Debug)]
+// struct TokenizerConfig {
+//     remove_stopwords: bool,
+//     text_column: usize,
+//     // Add other configuration options as needed
+// }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct TokenizerDict {
@@ -737,17 +737,17 @@ impl TokenizerDict {
         }
     }
 
-    fn process_with_config(&mut self, input_path: &str, config: &TokenizerConfig) -> io::Result<()> {
-        // Regular first sweep
-        self.first_sweep(input_path, config.text_column)?;
+    // fn process_with_config(&mut self, input_path: &str, config: &TokenizerConfig) -> io::Result<()> {
+    //     // Regular first sweep
+    //     self.first_sweep(input_path, config.text_column)?;
         
-        // Apply stopword filtering if configured
-        if config.remove_stopwords {
-            self.filter_stop_words();
-        }
+    //     // Apply stopword filtering if configured
+    //     if config.remove_stopwords {
+    //         self.filter_stop_words();
+    //     }
         
-        Ok(())
-    }    
+    //     Ok(())
+    // }    
     
     /// Calculate term frequency for a document
     fn calculate_tf(&self, term_counts: &HashMap<String, usize>, total_terms: usize) -> HashMap<String, f64> {
@@ -2178,12 +2178,12 @@ mod tests {
 
 fn main() -> io::Result<()> {
     
-    // config
-    // Stopwords option
-    let config = TokenizerConfig {
-        remove_stopwords: true,
-        text_column: 0,
-    };
+    // // config
+    // // Stopwords option
+    // let config = TokenizerConfig {
+    //     remove_stopwords: true,
+    //     text_column: 0,
+    // };
     
     // Ensure directories exist
     ensure_directories()?;
