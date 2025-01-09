@@ -1,6 +1,20 @@
 //! # Document-Term Porter-Stem Matrix in Rust
 //! document_term_porterstem_matrix_rust
 //!
+//!
+//! Two Sweep Workflow:
+//! 1. start an emtpy tokenizer lookup dict
+//! 2. start 1st sweep: collect stem-tokens
+//! 3. (1st sweep) load a row(or chunk of rows)
+//! 4. (1st sweep) process one row
+//! 5. (1st sweep) add each stem-token from each row to the lookup dict
+//! 6. (1st sweep) at end of 1st sweep through all rows, save tokenizer dict as file (json)/(jsonl?)
+//! 7. start 2nd sweep: add csv rows with counts
+//! 8. (2nd sweep) iterate though all rows again
+//! 9. (2nd sweep) add all token collumns to each row
+//! 10. (2nd sweep) add value count for each token colum to each row
+//! 11. save resulting .csv all old and new values
+//!
 //! 1. Original single-word Porter Stemmer, output -> string
 //! 3. from multi-word document-string, output -> ?
 //! 3. plain text utf8 document one-hot-matrix creation 
@@ -487,6 +501,136 @@ use serde::{
     Deserialize,
 };
 
+const NLTK_STOPWORDS: [&str; 127] = [
+    "i",
+    "me",
+    "my",
+    "myself",
+    "we",
+    "our",
+    "ours",
+    "ourselves",
+    "you",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
+    "he",
+    "him",
+    "his",
+    "himself",
+    "she",
+    "her",
+    "hers",
+    "herself",
+    "it",
+    "its",
+    "itself",
+    "they",
+    "them",
+    "their",
+    "theirs",
+    "themselves",
+    "what",
+    "which",
+    "who",
+    "whom",
+    "this",
+    "that",
+    "these",
+    "those",
+    "am",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "having",
+    "do",
+    "does",
+    "did",
+    "doing",
+    "a",
+    "an",
+    "the",
+    "and",
+    "but",
+    "if",
+    "or",
+    "because",
+    "as",
+    "until",
+    "while",
+    "of",
+    "at",
+    "by",
+    "for",
+    "with",
+    "about",
+    "against",
+    "between",
+    "into",
+    "through",
+    "during",
+    "before",
+    "after",
+    "above",
+    "below",
+    "to",
+    "from",
+    "up",
+    "down",
+    "in",
+    "out",
+    "on",
+    "off",
+    "over",
+    "under",
+    "again",
+    "further",
+    "then",
+    "once",
+    "here",
+    "there",
+    "when",
+    "where",
+    "why",
+    "how",
+    "all",
+    "any",
+    "both",
+    "each",
+    "few",
+    "more",
+    "most",
+    "other",
+    "some",
+    "such",
+    "no",
+    "nor",
+    "not",
+    "only",
+    "own",
+    "same",
+    "so",
+    "than",
+    "too",
+    "very",
+    "s",
+    "t",
+    "can",
+    "will",
+    "just",
+    "don",
+    "should",
+    "now",
+    ];
+
 /// Ensures the directory for a given path exists
 fn ensure_directory_for_path(path: &str) -> io::Result<()> {
     if let Some(dir) = Path::new(path).parent() {
@@ -499,6 +643,84 @@ fn ensure_directories() -> io::Result<()> {
     fs::create_dir_all("file_targets")?;
     fs::create_dir_all("output")?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct MultiFileProcessor {
+    input_files_list: Vec<String>,
+    output_dir: String,
+    text_column: usize,
+}
+
+impl MultiFileProcessor {
+    fn new(
+        input_files_list: Vec<String>,
+        output_dir: String,
+        text_column: usize,
+    ) -> Self {
+        Self {
+            input_files_list,
+            output_dir,
+            text_column,
+        }
+    }
+
+    fn process_all_files(&self) -> io::Result<()> {
+        // Ensure output directory exists
+        fs::create_dir_all(&self.output_dir)?;
+
+        // Phase 1: Collect stems across all files
+        let combined_tokenizer_dict = self.collect_stems_from_all_files()?;
+        
+        // Save the combined dictionary
+        let dict_path = format!("{}/combined_tokenizer_dict.json", self.output_dir);
+        combined_tokenizer_dict.save_to_json(&dict_path)?;
+
+        // Phase 2: Create BOW matrices for each file
+        self.create_bow_matrices_for_all_files(&combined_tokenizer_dict)?;
+
+        Ok(())
+    }
+
+    fn collect_stems_from_all_files(&self) -> io::Result<TokenizerDict> {
+        let mut combined_dict = TokenizerDict::new();
+
+        // Process each file
+        for input_file in &self.input_files_list {
+            println!("Collecting stems from: {}", input_file);
+            combined_dict.first_sweep(input_file, self.text_column)?;
+        }
+
+        Ok(combined_dict)
+    }
+
+    fn create_bow_matrices_for_all_files(&self, combined_tokenizer_dict: &TokenizerDict) -> io::Result<()> {
+        for input_file in &self.input_files_list {
+            let file_name = Path::new(input_file)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown");
+                
+            let output_path = format!("{}/bow_matrix_{}.csv", self.output_dir, file_name);
+            
+            println!("Creating BOW matrix for: {}", input_file);
+            combined_tokenizer_dict.second_sweep(
+                input_file, 
+                &output_path, 
+                self.text_column,
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
+
+#[derive(Debug)]
+struct TokenizerConfig {
+    remove_stopwords: bool,
+    text_column: usize,
+    // Add other configuration options as needed
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -515,24 +737,137 @@ impl TokenizerDict {
         }
     }
 
-    // Add TF-IDF calculation
-    fn calculate_tfidf(&self, term_frequencies: &HashMap<String, usize>) -> HashMap<String, f64> {
-        let mut tfidf = HashMap::new();
-        let doc_count = self.total_docs as f64;
+    fn process_with_config(&mut self, input_path: &str, config: &TokenizerConfig) -> io::Result<()> {
+        // Regular first sweep
+        self.first_sweep(input_path, config.text_column)?;
         
-        for (term, &freq) in term_frequencies.iter() {
-            if let Some(&doc_freq) = self.stems.get(term) {
-                let tf = freq as f64;
-                let idf = (doc_count / (doc_freq as f64 + 1.0)).ln();
-                tfidf.insert(term.clone(), tf * idf);
-            }
+        // Apply stopword filtering if configured
+        if config.remove_stopwords {
+            self.filter_stop_words();
         }
+        
+        Ok(())
+    }    
+    
+    /// Calculate term frequency for a document
+    fn calculate_tf(&self, term_counts: &HashMap<String, usize>, total_terms: usize) -> HashMap<String, f64> {
+        let mut tf = HashMap::new();
+        for (term, &count) in term_counts {
+            tf.insert(term.clone(), (count as f64) / (total_terms as f64));
+        }
+        tf
+    }
+
+    /// Calculate inverse document frequency
+    fn calculate_idf(&self, term: &str, total_docs: usize) -> f64 {
+        let docs_with_term = self.stems.get(term).unwrap_or(&0);
+        (total_docs as f64 / (1.0 + *docs_with_term as f64)).ln()
+    }
+
+    /// Calculate TF-IDF for a document
+    pub fn calculate_tfidf_for_document(
+        &self,
+        term_counts: &HashMap<String, usize>,
+        total_terms: usize,
+    ) -> HashMap<String, f64> {
+        let tf = self.calculate_tf(term_counts, total_terms);
+        let mut tfidf = HashMap::new();
+        
+        for (term, tf_value) in tf {
+            let idf = self.calculate_idf(&term, self.total_docs);
+            tfidf.insert(term, tf_value * idf);
+        }
+        
         tfidf
     }
 
+    /// Modify second_sweep to include TF-IDF scores
+    pub fn second_sweep_with_tfidf(
+        &self,
+        input_path: &str,
+        output_path: &str,
+        text_column: usize,
+    ) -> io::Result<()> {
+        let input_file = File::open(input_path)?;
+        let mut output_file = File::create(output_path)?;
+        let reader = BufReader::new(input_file);
+        let mut stemmer = PorterStemmer::new();
+
+        // Write header with TF-IDF columns
+        let mut lines = reader.lines();
+        if let Some(header_line) = lines.next() {
+            let original_header = header_line?;
+            let stem_header: String = self.stems.keys()
+                .flat_map(|stem| {
+                    vec![
+                        format!("stem_{}_freq", stem),
+                        format!("stem_{}_tfidf", stem),
+                    ]
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(output_file, "{},{}", original_header, stem_header)?;
+        }
+
+        // Process documents
+        for line_result in lines {
+            let line = line_result?;
+            let fields: Vec<&str> = line.split(',').collect();
+            
+            // Count stems and calculate total terms
+            let mut term_counts = HashMap::new();
+            let mut total_terms = 0;
+            
+            if let Some(text) = fields.get(text_column) {
+                let words = PorterStemmer::extract_words(text);
+                total_terms = words.len();
+                
+                for word in words {
+                    let stem = stemmer.stem(&word);
+                    *term_counts.entry(stem).or_insert(0) += 1;
+                }
+            }
+
+            // Calculate TF-IDF scores
+            let tfidf_scores = self.calculate_tfidf_for_document(&term_counts, total_terms);
+
+            // Write original line plus frequencies and TF-IDF scores
+            let scores: String = self.stems.keys()
+                .flat_map(|stem| {
+                    let freq = term_counts.get(stem).cloned().unwrap_or(0);
+                    let tfidf = tfidf_scores.get(stem).cloned().unwrap_or(0.0);
+                    vec![
+                        freq.to_string(),
+                        format!("{:.4}", tfidf),
+                    ]
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            
+            writeln!(output_file, "{},{}", line, scores)?;
+        }
+
+        Ok(())
+    }
+    
     // Add stop word filtering
-    fn filter_stop_words(&mut self, stop_words: &HashSet<String>) {
-        self.stems.retain(|stem, _| !stop_words.contains(stem));
+    fn filter_stop_words(&mut self) {
+        // Convert NLTK_STOPWORDS array to HashSet for efficient lookup
+        let stop_words: HashSet<&str> = NLTK_STOPWORDS.iter().copied().collect();
+        
+        // Filter out stems that match stopwords
+        self.stems.retain(|stem, _| !stop_words.contains(stem.as_str()));
+    }
+
+    // Add a new function that can be called during first_sweep
+    fn first_sweep_with_stopwords(&mut self, input_path: &str, text_column: usize) -> io::Result<()> {
+        // Perform regular first sweep
+        self.first_sweep(input_path, text_column)?;
+        
+        // Filter out stopwords
+        self.filter_stop_words();
+        
+        Ok(())
     }
 
     /// Save tokenizer dictionary to JSON
@@ -550,57 +885,6 @@ impl TokenizerDict {
         let dict: TokenizerDict = serde_json::from_reader(reader)?;
         Ok(dict)
     }
-
-    // /// Second sweep: Create BOW matrix with token frequencies
-    // fn second_sweep(
-    //     &self, 
-    //     input_path: &str, 
-    //     output_path: &str, 
-    //     text_column: usize
-    // ) -> Result<(), std::io::Error> {
-    //     let input_file = File::open(input_path)?;
-    //     let mut output_file = File::create(output_path)?;
-    //     let reader = BufReader::new(input_file);
-    //     let mut stemmer = PorterStemmer::new();
-
-    //     // Write header with stem columns
-    //     let header: String = self.stems.keys()
-    //         .map(|stem| format!("stem_{}_freq", stem))
-    //         .collect::<Vec<_>>()
-    //         .join(",");
-    //     writeln!(output_file, "{}", header)?;
-
-    //     // Skip input header
-    //     let mut lines = reader.lines();
-    //     let _ = lines.next();
-
-    //     for line_result in lines {
-    //         let line = line_result?;
-    //         let fields: Vec<&str> = line.split(',').collect();
-            
-    //         if let Some(text) = fields.get(text_column) {
-    //             let words = PorterStemmer::extract_words(text);
-                
-    //             // Count stem frequencies for this document
-    //             let mut doc_stem_freq = HashMap::new();
-    //             for word in words {
-    //                 let stem = stemmer.stem(&word);
-    //                 *doc_stem_freq.entry(stem).or_insert(0) += 1;
-    //             }
-
-    //             // Write frequencies for each known stem
-    //             let freq_line: String = self.stems.keys()
-    //                 .map(|stem| doc_stem_freq.get(stem).cloned().unwrap_or(0).to_string())
-    //                 .collect::<Vec<_>>()
-    //                 .join(",");
-                
-    //             writeln!(output_file, "{}", freq_line)?;
-    //         }
-    //     }
-
-    //     Ok(())
-    // }
-    
     
     // First sweep: Process each row individually
     fn first_sweep(&mut self, input_path: &str, text_column: usize) -> io::Result<()> {
@@ -644,43 +928,46 @@ impl TokenizerDict {
         let reader = BufReader::new(input_file);
         let mut stemmer = PorterStemmer::new();
 
-        // Write header with all known stems
-        let header: String = self.stems.keys()
-            .map(|stem| format!("stem_{}_freq", stem))
-            .collect::<Vec<_>>()
-            .join(",");
-        writeln!(output_file, "{}", header)?;
+        // Process header
+        let mut lines = reader.lines();
+        if let Some(header_line) = lines.next() {
+            let original_header = header_line?;
+            // Combine original header with stem columns
+            let stem_header: String = self.stems.keys()
+                .map(|stem| format!("stem_{}_freq", stem))
+                .collect::<Vec<_>>()
+                .join(",");
+            writeln!(output_file, "{},{}", original_header, stem_header)?;
+        }
 
         // Process each document
-        let mut lines = reader.lines();
-        let _ = lines.next(); // Skip header
-
         for line_result in lines {
             let line = line_result?;
             let fields: Vec<&str> = line.split(',').collect();
             
+            // Count stems in this document
+            let mut doc_stem_freq = HashMap::new();
             if let Some(text) = fields.get(text_column) {
-                // Count stems in this document
-                let mut doc_stem_freq = HashMap::new();
                 let words = PorterStemmer::extract_words(text);
                 for word in words {
                     let stem = stemmer.stem(&word);
                     *doc_stem_freq.entry(stem).or_insert(0) += 1;
                 }
-
-                // Write frequencies for all known stems
-                let freq_line: String = self.stems.keys()
-                    .map(|stem| doc_stem_freq.get(stem).cloned().unwrap_or(0).to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                
-                writeln!(output_file, "{}", freq_line)?;
             }
+
+            // Write original line plus frequencies for all known stems
+            let freq_values: String = self.stems.keys()
+                .map(|stem| doc_stem_freq.get(stem).cloned().unwrap_or(0).to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            
+            writeln!(output_file, "{},{}", line, freq_values)?;
         }
 
         Ok(())
-    }    
-}
+    }
+    
+} // end of impl TokenizerDict
 
 /// Porter Stemmer struct that maintains the state during stemming operations
 #[derive(Debug)]
@@ -800,67 +1087,6 @@ impl PorterStemmer {
         
         Ok(())
     }
-    // pub fn noload_process_csvtobow_matrix_streaming(
-    //     &self,
-    //     input_path: &str,
-    //     output_filename: &str,
-    //     dict_filename: &str,
-    //     text_column: usize,
-    //     chunk_size: usize,
-    // ) -> io::Result<()> {
-    //     println!("Processing CSV file: {}", input_path);  // Debug print
-        
-    //     Self::ensure_output_dir()?;
-    //     let output_path = Self::get_output_path(output_filename);
-    //     let dict_path = Self::get_output_path(dict_filename);
-        
-    //     // First pass: collect stems using streaming
-    //     let unique_stems = self.collect_unique_stems_streaming(input_path, text_column)?;
-    //     println!("Collected stems: {:?}", unique_stems);  // Debug print
-        
-    //     // Write stems dictionary
-    //     self.write_stem_dictionary(&unique_stems, &dict_path)?;
-        
-    //     // Convert to ordered Vec
-    //     let stem_vec: Vec<String> = unique_stems.into_iter().collect();
-        
-    //     // Second pass: create BOW matrix streaming
-    //     let input = BufReader::new(File::open(input_path)?);
-    //     let mut output = File::create(output_path)?;
-        
-    //     // Write header
-    //     let header: String = stem_vec
-    //         .iter()
-    //         .map(|stem| format!("stem_{}", stem))
-    //         .collect::<Vec<_>>()
-    //         .join(",");
-    //     writeln!(output, "{}", header)?;
-
-    //     // Process lines in chunks
-    //     let mut lines = input.lines();
-    //     let mut buffer = Vec::with_capacity(chunk_size);
-        
-    //     // Skip header
-    //     let _ = lines.next();
-        
-    //     while let Some(line) = lines.next() {
-    //         let line = line?;
-    //         buffer.push(line);
-            
-    //         if buffer.len() >= chunk_size {
-    //             self.process_chunk(&buffer, &stem_vec, text_column, &mut output)?;
-    //             buffer.clear();
-    //         }
-    //     }
-        
-    //     // Process remaining lines
-    //     if !buffer.is_empty() {
-    //         self.process_chunk(&buffer, &stem_vec, text_column, &mut output)?;
-    //     }
-        
-    //     Ok(())
-    // }
-
 
     /// Process a chunk of lines
     fn process_chunk(
@@ -1951,17 +2177,25 @@ mod tests {
 }  // End of Tests
 
 fn main() -> io::Result<()> {
+    
+    // config
+    // Stopwords option
+    let config = TokenizerConfig {
+        remove_stopwords: true,
+        text_column: 0,
+    };
+    
     // Ensure directories exist
     ensure_directories()?;
     
     let mut stemmer = PorterStemmer::new();
     
-    // //////////////////
-    // // 1. single word
-    // //////////////////
-    // print!("1. single word\n");
-    // let stemmed = stemmer.stem("running");
-    // println!("stemmed = stemmer.stem('running'): {}\n", stemmed); // Outputs: "run"
+    //////////////////
+    // 1. single word
+    //////////////////
+    print!("1. single word\n");
+    let stemmed = stemmer.stem("running");
+    println!("stemmed = stemmer.stem('running'): {}\n", stemmed); // Outputs: "run"
     
     // //////////////////////
     // // 2. single doc string
@@ -2061,7 +2295,71 @@ fn main() -> io::Result<()> {
         0, // corpus text column index
     )?;
 
+    ////////////////////////////////////////////////
+    // 5.2 Stopworks with Two Phase .csv ~tokenizer
+    //////////////////////?????????????????/////////
+    let input_path = "file_targets/corpus.csv";
+    let tokenizer_dict_path = "output/tokenizer_dict.json";
+    let bow_matrix_path = "output/bow_matrix.csv";
+
+    // First sweep with stopword filtering
+    let mut tokenizer_dict = TokenizerDict::new();
+    tokenizer_dict.first_sweep_with_stopwords(
+        input_path,
+        0, // corpus text column index
+    )?;
+    
+    // Save tokenizer dictionary
+    tokenizer_dict.save_to_json(tokenizer_dict_path)?;
+
+    // Optional: Load dictionary (demonstrating persistence)
+    let loaded_dict = TokenizerDict::load_from_json(tokenizer_dict_path)?;
+
+    // Second sweep: Create BOW matrix
+    loaded_dict.second_sweep(
+        input_path, // input path
+        bow_matrix_path, // output path
+        0, // corpus text column index
+    )?;    
+    
+    
+    //////////////////////////
+    // 6. Multiple .csv files
+    //////////////////////////
+    // Setup input files and output directory
+    let input_files_list = vec![
+        "file_targets/corpus.csv".to_string(),
+        "file_targets/corpus2.csv".to_string(),
+        "file_targets/corpus3.csv".to_string(),
+    ];
+    
+    let output_dir = "output/multiple_files";
+    
+    // Create and run the multi-file processor
+    let processor = MultiFileProcessor::new(
+        input_files_list,
+        output_dir.to_string(),
+        0,  // text column index
+    );
+    
+    processor.process_all_files()?;
+
+    //////////////////////////
+    // 7. TF-IDF 
+    //////////////////////////
+    // Process with TF-IDF scores
+    let tokenizer_dict = TokenizerDict::load_from_json(tokenizer_dict_path)?;
+
+    tokenizer_dict.second_sweep_with_tfidf(
+        input_path,
+        "output/bow_matrix_with_tfidf.csv",
+        0, // text column index
+    )?;
+    
+    
+    /////////////////////////
     // optional / inspection
+    /////////////////////////
     // read the stem dictionary:
     // Read and display the stems from the output directory
     let stems = PorterStemmer::read_stem_dictionary(
@@ -2084,7 +2382,7 @@ switching to simplar output path system
 check overall basic workflow:
 as the total list of stem-tokens exits not in each row 
 but ocross all rows,
-but, rows are read in chunks without loading the whole dataset.
+but, rows are read one at a time without loading the whole dataset.
 
 Two Sweep Workflow:
 1. start an emtpy tokenizer lookup dict
@@ -2097,18 +2395,24 @@ Two Sweep Workflow:
 8. (2nd sweep) iterate though all rows again
 9. (2nd sweep) add all token collumns to each row
 10. (2nd sweep) add value count for each token colum to each rown
-
+11. save resulting .csv all old and new values as labeled_FILENAME.csv
 
 Potential future items:
-- Add TF-IDF calculation
+- Add TF-IDF calculation (in progress)
 - Support for more advanced tokenization
 - Configurable stop word removal
 - Parallel processing of large datasets
+- optional lematizer perhaps from NLTK or other open-source
 
+A frequency count lookup dictionary is...theoretically useful,
+what a tokenizer lookup dictionary.
 
-errors:
- error of unknown origin from cargo run:
-Error: Os { code: 2, kind: NotFound, message: "No such file or directory" }
- 
+what format is best (or good enough) for efficient storing the list of stem-tokens
+to be reloaded to populate the csv file?
+
+next step / TODO:
+- remove unwrap or any code not safe for production use
+- make all error messages clear: identify the function producing the error
+- 
 
 */ 
