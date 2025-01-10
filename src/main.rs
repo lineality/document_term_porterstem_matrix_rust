@@ -1112,6 +1112,207 @@ impl fmt::Display for FeatureSelectionError {
 
 impl Error for FeatureSelectionError {}
 
+
+// Comprehensive Feature Analysis
+
+/// Represents comprehensive feature analysis results
+#[derive(Debug, Clone)]
+pub struct FeatureAnalysis {
+    pub feature_index: usize,
+    pub token: String,
+    pub chi_square_value: f64,
+    pub mutual_info_score: f64,
+    pub logistic_coef: f64,
+    pub combined_score: f64,
+}
+
+/// Calculate Chi-Square scores for each feature
+fn calculate_chi_square_scores(
+    bow_matrix: &Array2<f64>,
+    labels: &[usize],
+) -> Result<Vec<f64>, FeatureSelectionError> {
+    let num_features = bow_matrix.ncols();
+    let num_classes = labels.iter().max().unwrap_or(&0) + 1;
+    let mut scores = Vec::with_capacity(num_features);
+
+    for feature_idx in 0..num_features {
+        let feature_column = bow_matrix.column(feature_idx);
+        
+        // Create contingency table
+        let contingency = create_contingency_table(feature_column, labels, num_classes)?;
+        
+        // Calculate Chi-Square statistic
+        let chi_square = calculate_chi_square(&contingency)?;
+        scores.push(chi_square);
+    }
+
+    Ok(scores)
+}
+
+/// Calculate Mutual Information scores for each feature
+fn calculate_mutual_information_scores(
+    bow_matrix: &Array2<f64>,
+    labels: &[usize],
+) -> Result<Vec<f64>, FeatureSelectionError> {
+    let num_features = bow_matrix.ncols();
+    let num_samples = bow_matrix.nrows();
+    let num_classes = labels.iter().max().unwrap_or(&0) + 1;
+    
+    let mut scores = Vec::with_capacity(num_features);
+
+    for feature_idx in 0..num_features {
+        let feature_column = bow_matrix.column(feature_idx);
+        
+        // Calculate joint probability distribution
+        let joint_dist = calculate_joint_distribution(
+            feature_column,
+            labels,
+            num_classes,
+            num_samples,
+        );
+
+        // Calculate marginal probabilities
+        let class_marginals = calculate_class_marginals(&joint_dist);
+        let feature_marginals = calculate_feature_marginals(&joint_dist);
+
+        // Calculate mutual information
+        let mi = calculate_mi_score(
+            &joint_dist,
+            &class_marginals,
+            &feature_marginals,
+            num_classes,
+        );
+
+        scores.push(mi);
+    }
+
+    Ok(scores)
+}
+
+/// Calculate Logistic Regression coefficients for feature importance
+fn calculate_logistic_regression_scores(
+    bow_matrix: &Array2<f64>,
+    labels: &[usize],
+) -> Result<Vec<f64>, FeatureSelectionError> {
+    let num_features = bow_matrix.ncols();
+    let mut scores = Vec::with_capacity(num_features);
+
+    // Convert labels to f64
+    let y: Array1<f64> = Array1::from_iter(labels.iter().map(|&l| l as f64));
+
+    // Create and train logistic regression model
+    let mut model = LogisticRegression::new()
+        .with_max_iterations(1000)
+        .with_learning_rate(0.01);
+
+    match model.fit(bow_matrix.view(), y.view()) {
+        Ok(_) => {
+            // Get absolute values of coefficients as importance scores
+            for coef in model.coefficients.iter() {
+                scores.push(coef.abs());
+            }
+            Ok(scores)
+        },
+        Err(_) => Err(FeatureSelectionError::ComputationError(
+            "Failed to fit logistic regression model".to_string()
+        )),
+    }
+}
+
+/// Performs comprehensive feature analysis using multiple methods
+pub fn analyze_feature_correlations(
+    bow_matrix: &Array2<f64>,
+    labels: &[usize],
+    stem_dictionary: Option<&[String]>,
+) -> Result<Vec<FeatureAnalysis>, FeatureSelectionError> {
+    // Validate input
+    if bow_matrix.is_empty() || labels.is_empty() {
+        return Err(FeatureSelectionError::EmptyInput);
+    }
+    if bow_matrix.nrows() != labels.len() {
+        return Err(FeatureSelectionError::DimensionMismatch);
+    }
+
+    let num_features = bow_matrix.ncols();
+    let mut results = Vec::with_capacity(num_features);
+
+    // Calculate feature importance using different methods
+    let chi_square_scores = calculate_chi_square_scores(bow_matrix, labels)?;
+    let mutual_info_scores = calculate_mutual_information_scores(bow_matrix, labels)?;
+    let logistic_scores = calculate_logistic_regression_scores(bow_matrix, labels)?;
+
+    // Normalize scores explicit f64 versions:
+    let chi_square_max = chi_square_scores.iter()
+        .fold(0.0_f64, |a: f64, &b| f64::max(a, b));
+    let mutual_info_max = mutual_info_scores.iter()
+        .fold(0.0_f64, |a: f64, &b| f64::max(a, b));
+    let logistic_max = logistic_scores.iter()
+        .fold(0.0_f64, |a: f64, &b| f64::max(a, b));
+    
+    // Combine results
+    for i in 0..num_features {
+        let token = match stem_dictionary {
+            Some(dict) => dict.get(i)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("feature_{}", i)),
+            None => format!("feature_{}", i),
+        };
+
+        let chi_square_norm = if chi_square_max > 0.0 { 
+            chi_square_scores[i] / chi_square_max 
+        } else { 
+            0.0 
+        };
+        let mutual_info_norm = if mutual_info_max > 0.0 { 
+            mutual_info_scores[i] / mutual_info_max 
+        } else { 
+            0.0 
+        };
+        let logistic_norm = if logistic_max > 0.0 { 
+            logistic_scores[i] / logistic_max 
+        } else { 
+            0.0 
+        };
+
+        // Calculate combined score (weighted average)
+        let combined_score = (chi_square_norm + mutual_info_norm + logistic_norm) / 3.0;
+
+        results.push(FeatureAnalysis {
+            feature_index: i,
+            token,
+            chi_square_value: chi_square_scores[i],
+            mutual_info_score: mutual_info_scores[i],
+            logistic_coef: logistic_scores[i],
+            combined_score,
+        });
+    }
+
+    // Sort by combined score in descending order
+    results.sort_by(|a, b| b.combined_score.partial_cmp(&a.combined_score).unwrap());
+
+    Ok(results)
+}
+
+/// Helper function to print analysis results
+pub fn print_feature_analysis(
+    analysis: &[FeatureAnalysis],
+    top_n: Option<usize>,
+) {
+    let n = top_n.unwrap_or(analysis.len());
+    println!("\nTop {} Features by Combined Analysis:", n);
+    println!("{:-<80}", "");
+
+    for (i, result) in analysis.iter().take(n).enumerate() {
+        println!("{}. Token: {}", i + 1, result.token);
+        println!("   Chi-Square Value: {:.4}", result.chi_square_value);
+        println!("   Mutual Information: {:.4}", result.mutual_info_score);
+        println!("   Logistic Coefficient: {:.4}", result.logistic_coef);
+        println!("   Combined Score: {:.4}", result.combined_score);
+        println!("{:-<80}", "");
+    }
+}
+
+
 /// Represents the correlation statistics for a single feature
 #[derive(Debug, Clone)]
 pub struct FeatureCorrelation {
@@ -2564,7 +2765,51 @@ mod tests {
     use tempfile::NamedTempFile;
     use ndarray::arr2;
 
-   // GLM
+    // comprehensive feature analysis
+    #[test]
+    fn test_basic_feature_analysis() {
+        let bow_matrix = arr2(&[
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]);
+        let labels = vec![0, 1, 0, 1];
+        let stem_dictionary = vec![
+            "first".to_string(),
+            "second".to_string(),
+            "third".to_string(),
+        ];
+
+        let result = analyze_feature_correlations(&bow_matrix, &labels, Some(&stem_dictionary));
+        assert!(result.is_ok());
+
+        if let Ok(analysis) = result {
+            assert_eq!(analysis.len(), 3);
+            assert!(analysis[0].combined_score >= analysis[1].combined_score);
+            assert!(analysis[1].combined_score >= analysis[2].combined_score);
+        }
+    }
+
+    #[test]
+    fn cfa_test_empty_input() {
+        let bow_matrix = Array2::<f64>::zeros((0, 0));
+        let labels = vec![];
+        
+        let result = analyze_feature_correlations(&bow_matrix, &labels, None);
+        assert!(matches!(result, Err(FeatureSelectionError::EmptyInput)));
+    }
+
+    #[test]
+    fn cfa_test_dimension_mismatch() {
+        let bow_matrix = arr2(&[[1.0, 0.0], [0.0, 1.0]]);
+        let labels = vec![0, 1, 2];  // More labels than rows
+        
+        let result = analyze_feature_correlations(&bow_matrix, &labels, None);
+        assert!(matches!(result, Err(FeatureSelectionError::DimensionMismatch)));
+    }
+   
+    // GLM
     #[test]
     fn test_logistic_regression_basic() {
         let x = arr2(&[
@@ -3251,8 +3496,35 @@ fn main() -> io::Result<()> {
     // Print results
     print_mi_feature_importance(&mi_scores, Some(&stem_dictionary), Some(3));
 
+
+    //////////////////////
+    // GLM
+    //////////////////////
     
     
+    ////////////////////////////////
+    // analyze_feature_correlations
+    ////////////////////////////////
+    let bow_matrix = arr2(&[
+        [1.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]);
+    let labels = vec![0, 1, 0, 1];
+    let stem_dictionary = vec![
+        "first".to_string(),
+        "second".to_string(),
+        "third".to_string(),
+    ];
+
+    let analysis_results = analyze_feature_correlations(
+        &bow_matrix,
+        &labels,
+        Some(&stem_dictionary)
+    )?;
+
+    print_feature_analysis(&analysis_results, Some(3));
     
     Ok(())
     
