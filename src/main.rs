@@ -478,9 +478,12 @@
 //!    free(s);
 //!    return 0;
 //! }
+
+// use std::fmt::Write;
+// use std::io::Write;
+
 use std::f64::EPSILON;
-use std::fs;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{
     self,
     BufRead,
@@ -496,7 +499,9 @@ use std::sync::Mutex;
 use std::path::Path;
 use std::error::Error;
 use std::fmt;
+use std::fmt::Write as FmtWrite; // Note the alias to avoid confl
 
+// 3rd Party Ug
 use rayon::prelude::*;
 use serde::{
     Serialize, 
@@ -508,7 +513,7 @@ use ndarray::{
     ArrayView1,
     ArrayView2,
     arr2,
-    // Zip,
+
 };
 
 const NLTK_STOPWORDS: [&str; 127] = [
@@ -1293,7 +1298,97 @@ pub fn analyze_feature_correlations(
     Ok(results)
 }
 
-/// Helper function to print analysis results
+
+/// Save analysis results to a file in CSV format
+pub fn save_feature_analysis_csv(
+    analysis: &[FeatureAnalysis],
+    output_path: &str,
+) -> io::Result<()> {
+    let mut file = File::create(output_path)?;
+    
+    // Write header
+    writeln!(file, "Token,Chi_Square,Mutual_Information,Logistic_Coefficient,Combined_Score")?;
+
+    // Write data
+    for result in analysis {
+        writeln!(
+            file,
+            "{},{:.6},{:.6},{:.6},{:.6}",
+            result.token,
+            result.chi_square_value,
+            result.mutual_info_score,
+            result.logistic_coef,
+            result.combined_score
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Generate a detailed summary report
+pub fn generate_analysis_summary(
+    analysis: &[FeatureAnalysis],
+    output_path: Option<&str>,
+) -> io::Result<String> {
+    let mut summary = String::new();
+    
+    // Calculate basic statistics
+    let total_features = analysis.len();
+    let avg_chi_square: f64 = analysis.iter().map(|x| x.chi_square_value).sum::<f64>() / total_features as f64;
+    let avg_mi: f64 = analysis.iter().map(|x| x.mutual_info_score).sum::<f64>() / total_features as f64;
+    let avg_coef: f64 = analysis.iter().map(|x| x.logistic_coef).sum::<f64>() / total_features as f64;
+
+    // Format summary using write! instead of writeln!
+    let _ = write!(summary, "Feature Analysis Summary\n");
+    let _ = write!(summary, "{:-<50}\n", "");
+    let _ = write!(summary, "Total Features Analyzed: {}\n", total_features);
+    let _ = write!(summary, "Average Chi-Square Value: {:.4}\n", avg_chi_square);
+    let _ = write!(summary, "Average Mutual Information: {:.4}\n", avg_mi);
+    let _ = write!(summary, "Average Logistic Coefficient: {:.4}\n", avg_coef);
+    let _ = write!(summary, "\nTop 10 Most Important Features:\n");
+    
+    for (i, result) in analysis.iter().take(10).enumerate() {
+        let _ = write!(
+            summary,
+            "{}. {} (Score: {:.4})\n", 
+            i + 1, 
+            result.token, 
+            result.combined_score
+        );
+    }
+
+    // Save to file if path provided
+    if let Some(path) = output_path {
+        fs::write(path, &summary)?;
+    }
+
+    Ok(summary)
+}
+
+/// Example usage function
+pub fn analyze_and_report(
+    analysis_results: Vec<FeatureAnalysis>,
+    output_dir: &str,
+) -> io::Result<()> {
+    // Ensure output directory exists
+    fs::create_dir_all(output_dir)?;
+
+    // Print detailed analysis
+    print_feature_analysis(&analysis_results, Some(20));
+
+    // Save to CSV
+    let csv_path = format!("{}/feature_analysis.csv", output_dir);
+    save_feature_analysis_csv(&analysis_results, &csv_path)?;
+
+    // Generate and save summary
+    let summary_path = format!("{}/analysis_summary.txt", output_dir);
+    let summary = generate_analysis_summary(&analysis_results, Some(&summary_path))?;
+    println!("\nAnalysis Summary:\n{}", summary);
+
+    Ok(())
+}
+
+/// Print feature analysis results with customizable formatting
 pub fn print_feature_analysis(
     analysis: &[FeatureAnalysis],
     top_n: Option<usize>,
@@ -1311,7 +1406,6 @@ pub fn print_feature_analysis(
         println!("{:-<80}", "");
     }
 }
-
 
 /// Represents the correlation statistics for a single feature
 #[derive(Debug, Clone)]
@@ -2765,6 +2859,63 @@ mod tests {
     use tempfile::NamedTempFile;
     use ndarray::arr2;
 
+    
+    #[test]
+    fn test_feature_analysis_printing() {
+        let analysis = vec![
+            FeatureAnalysis {
+                feature_index: 0,
+                token: "test_token".to_string(),
+                chi_square_value: 0.5,
+                mutual_info_score: 0.3,
+                logistic_coef: 0.4,
+                combined_score: 0.4,
+            }
+        ];
+        
+        print_feature_analysis(&analysis, Some(1));
+    }
+
+    #[test]
+    fn test_save_analysis_csv() -> io::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let output_path = temp_dir.path().join("test_analysis.csv");
+        
+        let analysis = vec![
+            FeatureAnalysis {
+                feature_index: 0,
+                token: "test_token".to_string(),
+                chi_square_value: 0.5,
+                mutual_info_score: 0.3,
+                logistic_coef: 0.4,
+                combined_score: 0.4,
+            }
+        ];
+
+        save_feature_analysis_csv(&analysis, output_path.to_str().unwrap())?;
+        assert!(output_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_generate_summary() -> io::Result<()> {
+        let analysis = vec![
+            FeatureAnalysis {
+                feature_index: 0,
+                token: "test_token".to_string(),
+                chi_square_value: 0.5,
+                mutual_info_score: 0.3,
+                logistic_coef: 0.4,
+                combined_score: 0.4,
+            }
+        ];
+
+        let summary = generate_analysis_summary(&analysis, None)?;
+        assert!(!summary.is_empty());
+        assert!(summary.contains("Feature Analysis Summary"));
+        Ok(())
+    }
+    
     // comprehensive feature analysis
     #[test]
     fn test_basic_feature_analysis() {
@@ -3526,6 +3677,24 @@ fn main() -> io::Result<()> {
 
     print_feature_analysis(&analysis_results, Some(3));
     
+    
+    // Your analysis results
+    let analysis_results = vec![
+        FeatureAnalysis {
+            feature_index: 0,
+            token: "example_token".to_string(),
+            chi_square_value: 0.75,
+            mutual_info_score: 0.45,
+            logistic_coef: 0.60,
+            combined_score: 0.60,
+        },
+        // ... more results
+    ];
+
+    // Generate reports
+    analyze_and_report(analysis_results, "output/analysis")?;
+    
+    // Finis
     Ok(())
     
 }
