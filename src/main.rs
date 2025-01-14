@@ -1117,6 +1117,12 @@ impl fmt::Display for FeatureSelectionError {
 
 impl Error for FeatureSelectionError {}
 
+// #[derive(Debug, Clone)]
+// pub struct NormalizedCorrelation {
+//     pub raw_score: f64,
+//     pub normalized_score: f64,  // 0 to 1 scale
+//     pub strength: CorrelationStrength,
+// }
 
 // Comprehensive Feature Analysis
 
@@ -3700,6 +3706,13 @@ fn main() -> io::Result<()> {
 }
 
 /*
+normal_byte_classer_rust
+byteclasser
+ngram byte target modeling
+byteclasser?
+labels_to_byte_matrix_classifier
+doc_term_porterstem_matrix_rust
+labeled_dataset_to_by_scan_classifier_rust
 byte_tokenizer_rust
 
 Potential future items:
@@ -3709,6 +3722,12 @@ Potential future items:
 - Parallel processing of large datasets
 - optional lematizer perhaps from NLTK or other open-source
 
+maybe add other input formats:
+dir of docs
+jsonl
+json
+
+
 what format is best (or good enough) for efficient storing the list of stem-tokens
 to be reloaded to populate the csv file?
 
@@ -3717,4 +3736,58 @@ next step / TODO:
 - make all error messages clear: identify the function producing the error
 - check that stopwords can be enabled for multi-document processing
 
+
+normalized byte classer scoring
+
+1. get correlation analysis with normalized results
+an overall normalized correclation score becomes the weight of that target (byte ideally)
+(reach goal: with possible negative scored values for negative correlations, e.g. terms that only correlate with not-hotdog,
+    as meat terms for vegan food perhaps)
+
+2. Run byteclasser with threshold... 
+default threshold of 1, 
+
+(experiment with recipe etc tests)
+
+
+a normalized overal standard correclation score can be added on to (at least some) of the existing correlation tests?
+
+again, the target is just like weighted matching,
+weaker correlated targets will get a low weight (normalized correlation score), strongly correclated targets will get a higher score. and hopefully with real example testing some standard range of threshold (maybe simple: 1) will work to flag that class for that document.   the full normal analysis needs to be there for transparancy, but a normalized score should also be able to be added on without much code change. 
+
+my first thought it doubleing the FeatureAnalysis fields: 
+
+
+
+/// Extend the existing FeatureAnalysis with normalized metrics
+#[derive(Debug, Clone)]
+pub struct FeatureAnalysis {
+
+    pub standard_token: String,
+// string byte?
+
+    // Existing fields
+    pub standard_feature_index: usize,
+    pub standard_chi_square_value: f64,
+    pub standard_mutual_info_score: f64,
+    pub standard_logistic_coef: f64,
+// combining different statistical tests without normalization would be meaningless and mathematically incorrect
+
+//normalized_
+    pub normalized_feature_index: usize,
+    pub normalized_chi_square_value: f64,
+    pub normalized_mutual_info_score: f64,
+    pub normalized_ logistic_coef: f64,
+
+// combined
+    pub normalized_combined_score: f64,
+
+no colliding names
+
+Also, there should be a plan for how to use tfid numbers...
+
+or to have an option of raw stem frequency vs. ftidf perhaps....
+
+
 */ 
+
