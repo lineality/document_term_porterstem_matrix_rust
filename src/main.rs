@@ -1569,6 +1569,12 @@ struct MultiFileProcessor {
 }
 
 impl MultiFileProcessor {
+    /// Creates a new MultiFileProcessor instance
+    /// 
+    /// # Arguments
+    /// * `input_files_list` - List of paths to input CSV files to process
+    /// * `output_dir` - Directory where output files will be written
+    /// * `text_column` - Zero-based index specifying which column in the CSV contains the text to process
     fn new(
         input_files_list: Vec<String>,
         output_dir: String,
@@ -1646,6 +1652,11 @@ struct TokenizerDict {
 }
 
 impl TokenizerDict {
+    /// First sweep through CSV to collect stems
+    /// 
+    /// # Arguments
+    /// * `single_file_input_path` - Path to input CSV file
+    /// * `text_column` - Zero-based index of column containing text to process
     fn new() -> Self {
         TokenizerDict {
             stems: HashMap::new(),
@@ -1653,9 +1664,9 @@ impl TokenizerDict {
         }
     }
 
-    // fn process_with_config(&mut self, input_path: &str, config: &TokenizerConfig) -> io::Result<()> {
+    // fn process_with_config(&mut self, single_file_input_path: &str, config: &TokenizerConfig) -> io::Result<()> {
     //     // Regular first sweep
-    //     self.first_sweep(input_path, config.text_column)?;
+    //     self.first_sweep(single_file_input_path, config.text_column)?;
         
     //     // Apply stopword filtering if configured
     //     if config.remove_stopwords {
@@ -1698,13 +1709,19 @@ impl TokenizerDict {
     }
 
     /// Modify second_sweep to include TF-IDF scores
+    /// Second sweep with TF-IDF scoring
+    /// 
+    /// # Arguments
+    /// * `single_file_input_path` - Path to input CSV file
+    /// * `output_path` - Path where TF-IDF matrix CSV will be written
+    /// * `text_column` - Zero-based index of column containing text to process
     pub fn second_sweep_with_tfidf(
         &self,
-        input_path: &str,
+        single_file_input_path: &str,
         output_path: &str,
         text_column: usize,
     ) -> io::Result<()> {
-        let input_file = File::open(input_path)?;
+        let input_file = File::open(single_file_input_path)?;
         let mut output_file = File::create(output_path)?;
         let reader = BufReader::new(input_file);
         let mut stemmer = PorterStemmer::new();
@@ -1735,6 +1752,7 @@ impl TokenizerDict {
             let mut total_terms = 0;
             
             if let Some(text) = fields.get(text_column) {
+                // println!("Processing text: {}", text);  // Debug log                
                 let words = PorterStemmer::extract_words(text);
                 total_terms = words.len();
                 
@@ -1742,6 +1760,9 @@ impl TokenizerDict {
                     let stem = stemmer.stem(&word);
                     *term_counts.entry(stem).or_insert(0) += 1;
                 }
+            } else {
+                println!("Warning: No text found at column {}", text_column);
+                continue;
             }
 
             // Calculate TF-IDF scores
@@ -1775,10 +1796,15 @@ impl TokenizerDict {
         self.stems.retain(|stem, _| !stop_words.contains(stem.as_str()));
     }
 
-    // Add a new function that can be called during first_sweep
-    fn first_sweep_with_stopwords(&mut self, input_path: &str, text_column: usize) -> io::Result<()> {
+
+    /// First sweep with stopword filtering
+    /// 
+    /// # Arguments
+    /// * `single_file_input_path` - Path to input CSV file
+    /// * `text_column` - Zero-based index of column containing text to process
+    fn first_sweep_with_stopwords(&mut self, single_file_input_path: &str, text_column: usize) -> io::Result<()> {
         // Perform regular first sweep
-        self.first_sweep(input_path, text_column)?;
+        self.first_sweep(single_file_input_path, text_column)?;
         
         // Filter out stopwords
         self.filter_stop_words();
@@ -1803,8 +1829,8 @@ impl TokenizerDict {
     }
     
     // First sweep: Process each row individually
-    fn first_sweep(&mut self, input_path: &str, text_column: usize) -> io::Result<()> {
-        let file = File::open(input_path)?;
+    fn first_sweep(&mut self, single_file_input_path: &str, text_column: usize) -> io::Result<()> {
+        let file = File::open(single_file_input_path)?;
         let reader = BufReader::new(file);
         let mut stemmer = PorterStemmer::new();
 
@@ -1819,11 +1845,15 @@ impl TokenizerDict {
             
             if let Some(text) = fields.get(text_column) {
                 // Extract and count stems for this document
+                // println!("Processing text: {}", text);  // Debug log                
                 let words = PorterStemmer::extract_words(text);
                 for word in words {
                     let stem = stemmer.stem(&word);
                     *self.stems.entry(stem).or_insert(0) += 1;
                 }
+            } else {
+                println!("Warning: No text found at column {}", text_column);
+                continue;
             }
             
             self.total_docs += 1;
@@ -1833,13 +1863,19 @@ impl TokenizerDict {
     }
 
     // Second sweep: Create BOW matrix using collected stems
+    /// Second sweep through CSV to create BOW (Bag of Words) matrix
+    /// 
+    /// # Arguments
+    /// * `single_file_input_path` - Path to input CSV file
+    /// * `output_path` - Path where BOW matrix CSV will be written
+    /// * `text_column` - Zero-based index of column containing text to process
     fn second_sweep(
         &self, 
-        input_path: &str, 
+        single_file_input_path: &str, 
         output_path: &str, 
         text_column: usize
     ) -> io::Result<()> {
-        let input_file = File::open(input_path)?;
+        let input_file = File::open(single_file_input_path)?;
         let mut output_file = File::create(output_path)?;
         let reader = BufReader::new(input_file);
         let mut stemmer = PorterStemmer::new();
@@ -1864,11 +1900,15 @@ impl TokenizerDict {
             // Count stems in this document
             let mut doc_stem_freq = HashMap::new();
             if let Some(text) = fields.get(text_column) {
+                // println!("Processing text: {}", text);  // Debug log                
                 let words = PorterStemmer::extract_words(text);
                 for word in words {
                     let stem = stemmer.stem(&word);
                     *doc_stem_freq.entry(stem).or_insert(0) += 1;
                 }
+            } else {
+                println!("Warning: No text found at column {}", text_column);
+                continue;
             }
 
             // Write original line plus frequencies for all known stems
@@ -1945,9 +1985,17 @@ impl PorterStemmer {
     }
 
     /// Process CSV in a streaming fashion
+    /// Process CSV in a streaming fashion to create BOW matrix
+    /// 
+    /// # Arguments
+    /// * `single_file_input_path` - Path to input CSV file
+    /// * `output_path` - Path for output BOW matrix CSV
+    /// * `dict_path` - Path for output stem dictionary
+    /// * `text_column` - Zero-based index of column containing text to process
+    /// * `chunk_size` - Number of rows to process at once
     pub fn noload_process_csvtobow_matrix_streaming(
         &self,
-        input_path: &str,
+        single_file_input_path: &str,
         output_path: &str, // Full path
         dict_path: &str,   // Full path
         text_column: usize,
@@ -1958,7 +2006,7 @@ impl PorterStemmer {
         ensure_directory_for_path(dict_path)?;
         
         // First pass: collect stems using streaming
-        let unique_stems = self.collect_unique_stems_streaming(input_path, text_column)?;
+        let unique_stems = self.collect_unique_stems_streaming(single_file_input_path, text_column)?;
         println!("Collected stems: {:?}", unique_stems);  // Debug print
         
         // Write stems dictionary
@@ -1968,7 +2016,7 @@ impl PorterStemmer {
         let stem_vec: Vec<String> = unique_stems.into_iter().collect();
         
         // Second pass: create BOW matrix streaming
-        let input = BufReader::new(File::open(input_path)?);
+        let input = BufReader::new(File::open(single_file_input_path)?);
         let mut output = File::create(output_path)?;
         
         // Write header - preserve original header and add stem columns
@@ -2043,10 +2091,10 @@ impl PorterStemmer {
     /// Collect unique stems using streaming
     fn collect_unique_stems_streaming(
         &self,
-        input_path: &str,
+        single_file_input_path: &str,
         text_column: usize,
     ) -> io::Result<HashSet<String>> {
-        let file = File::open(input_path)?;
+        let file = File::open(single_file_input_path)?;
         let reader = BufReader::new(file);
         let mut unique_stems = HashSet::new();
         let mut stemmer = PorterStemmer::new();
@@ -2070,19 +2118,20 @@ impl PorterStemmer {
     }
 
     
-    /// Process a CSV file and create a document-term stem matrix
+    /// Process CSV and create both stem dictionary and BOW matrix
     /// 
     /// # Arguments
-    /// * `input_path` - Path to input CSV file
-    /// * `output_path` - Path for output CSV file
-    /// * `text_column` - Name or index of the column containing text to stem
+    /// * `single_file_input_path` - Path to input CSV file
+    /// * `output_path` - Path for output BOW matrix CSV
+    /// * `dict_path` - Path for output stem dictionary
+    /// * `text_column` - Zero-based index of column containing text to process
     /// 
     /// # Returns
     /// Result indicating success or failure
     /// Process CSV and create both stem dictionary and BOW matrix
     pub fn process_csv_to_bow_matrix(
         &self,
-        input_path: &str,
+        single_file_input_path: &str,
         output_path: &str,
         dict_path: &str,
         text_column: usize,
@@ -2092,7 +2141,7 @@ impl PorterStemmer {
         ensure_directory_for_path(dict_path)?;
         
         // First pass: collect unique stems
-        let unique_stems = self.collect_unique_stems(input_path, text_column)?;
+        let unique_stems = self.collect_unique_stems(single_file_input_path, text_column)?;
         
         // Write stem dictionary
         self.write_stem_dictionary(&unique_stems, dict_path)?;
@@ -2101,7 +2150,7 @@ impl PorterStemmer {
         let stem_vec: Vec<String> = unique_stems.into_iter().collect();
         
         // Second pass: create the document-term matrix
-        let input_file = File::open(input_path)?;
+        let input_file = File::open(single_file_input_path)?;
         let output_file = File::create(output_path)?;
         self.create_bow_matrix(
             input_file,
@@ -2113,13 +2162,17 @@ impl PorterStemmer {
         Ok(())
     }
 
-    /// Collect all unique stems from the input CSV
+    /// Collect unique stems from CSV file
+    /// 
+    /// # Arguments
+    /// * `single_file_input_path` - Path to input CSV file
+    /// * `text_column` - Zero-based index of column containing text to process
     fn collect_unique_stems(
         &self,
-        input_path: &str,
+        single_file_input_path: &str,
         text_column: usize,
     ) -> io::Result<HashSet<String>> {
-        let file = File::open(input_path)?;
+        let file = File::open(single_file_input_path)?;
         let reader = BufReader::new(file);
         let mut unique_stems = HashSet::new();
         let mut stemmer = PorterStemmer::new();
@@ -2225,7 +2278,7 @@ impl PorterStemmer {
     /// Process a document file line by line and create stem dictionary
     /// 
     /// # Arguments
-    /// * `input_path` - Path to input text file
+    /// * `single_file_input_path` - Path to input text file
     /// * `dict_path` - Path for output stem dictionary
     /// * `chunk_size` - Number of lines to process at once
     /// 
@@ -2233,14 +2286,14 @@ impl PorterStemmer {
     /// Result containing HashSet of stems for immediate use if needed
     pub fn noload_process_filedocument_streaming(
         &self,
-        input_path: &str,
+        single_file_input_path: &str,
         output_dict_path: &str,
         chunk_size: usize,
     ) -> io::Result<HashSet<String>> {
         
         ensure_directory_for_path(output_dict_path)?;
         
-        let file = File::open(input_path)?;
+        let file = File::open(single_file_input_path)?;
         let reader = BufReader::new(file);
         let mut unique_stems = HashSet::new();
         let mut stemmer = PorterStemmer::new();
@@ -2282,17 +2335,17 @@ impl PorterStemmer {
     /// Process document with frequency counting, streaming style
     pub fn noload_process_documentfile_frequencies_streaming(
         &self,
-        input_path: &str,
+        single_file_input_path: &str,
         output_dict_path: &str,
         output_freq_path: &str,
         chunk_size: usize,
     ) -> io::Result<HashMap<String, usize>> {
         
-        ensure_directory_for_path(input_path)?;
+        ensure_directory_for_path(single_file_input_path)?;
         ensure_directory_for_path(output_dict_path)?;
         ensure_directory_for_path(output_freq_path)?;
         
-        let file = File::open(input_path)?;
+        let file = File::open(single_file_input_path)?;
         let reader = BufReader::new(file);
         let mut word_frequencies = HashMap::new();
         let mut stemmer = PorterStemmer::new();
@@ -2552,20 +2605,70 @@ impl PorterStemmer {
         }
     }
 
+    // /// Returns true if the word ends with the given string
+    // fn ends_with(&mut self, s: &str) -> bool {
+    //     let length = s.len();
+    //     if length > self.k - self.k0 + 1 { return false; }
+        
+    //     let end = &self.buffer[(self.k + 1 - length)..=self.k];
+    //     let s_chars: Vec<char> = s.chars().collect();
+        
+    //     if end != &s_chars[..] { return false; }
+        
+    //     self.j = self.k - length;  // thread 'main' panicked at src/main.rs:2618:18: ->attempt to subtract with overflow
+    //     true
+    // }
+
     /// Returns true if the word ends with the given string
+    /// 
+    /// # Arguments
+    /// * `s` - The suffix string to check for
+    /// 
+    /// # Returns
+    /// * `bool` - True if the word ends with the given string
+    /// 
+    /// # Safety
+    /// Performs bounds checking to prevent integer overflow
     fn ends_with(&mut self, s: &str) -> bool {
         let length = s.len();
+        
+        // // Debug logging
+        // println!("Checking ends_with: word={:?}, suffix={}, k={}, k0={}, length={}", 
+        //     self.buffer, s, self.k, self.k0, length);
+        
+        // Early returns with additional safety checks
+        if length == 0 { return true; }
+        if self.k < length - 1 { return false; }  // Not enough characters
         if length > self.k - self.k0 + 1 { return false; }
         
-        let end = &self.buffer[(self.k + 1 - length)..=self.k];
+        // Safe subtraction with checked arithmetic
+        let start_pos = match self.k.checked_sub(length - 1) {
+            Some(pos) => pos,
+            None => {
+                println!("Warning: Arithmetic overflow prevented in ends_with");
+                return false;
+            }
+        };
+        
+        // Get the end slice safely
+        let end = &self.buffer[start_pos..=self.k];
         let s_chars: Vec<char> = s.chars().collect();
         
         if end != &s_chars[..] { return false; }
         
-        self.j = self.k - length;
+        // Safe subtraction for setting j
+        self.j = match self.k.checked_sub(length) {
+            Some(pos) => pos,
+            None => {
+                println!("Warning: Arithmetic overflow prevented when setting j");
+                return false;
+            }
+        };
+        
         true
     }
-
+        
+        
     /// Sets (j+1),...k to the characters in the string s
     fn set_to(&mut self, s: &str) {
         let s_chars: Vec<char> = s.chars().collect();
@@ -2597,6 +2700,8 @@ impl PorterStemmer {
     /// 2. Applies steps 1a through 5 in sequence
     /// 3. Returns the stemmed result
     pub fn stem(&mut self, word: &str) -> String {
+        // println!("Attempting to stem word: {}", word);  // Debug print
+    
         if word.is_empty() { return String::new(); }
         
         // Convert to lowercase and store in buffer
@@ -2865,6 +2970,39 @@ mod tests {
     use tempfile::NamedTempFile;
     use ndarray::arr2;
 
+    #[test]
+    fn test_ends_with_edge_cases() {
+        let mut stemmer = PorterStemmer::new();
+        
+        // Test empty string
+        stemmer.buffer = vec!['a'];
+        stemmer.k = 0;
+        stemmer.k0 = 0;
+        assert!(stemmer.ends_with(""));
+        
+        // Test single character
+        stemmer.buffer = vec!['a'];
+        stemmer.k = 0;
+        stemmer.k0 = 0;
+        assert!(stemmer.ends_with("a"));
+        assert!(!stemmer.ends_with("b"));
+        
+        // Test short buffer
+        stemmer.buffer = vec!['a'];
+        stemmer.k = 0;
+        stemmer.k0 = 0;
+        assert!(!stemmer.ends_with("ab"));  // Should return false, not panic
+        
+        // Test boundary conditions
+        stemmer.buffer = vec!['a', 'b', 'c'];
+        stemmer.k = 2;
+        stemmer.k0 = 0;
+        assert!(stemmer.ends_with("c"));
+        assert!(stemmer.ends_with("bc"));
+        assert!(stemmer.ends_with("abc"));
+        assert!(!stemmer.ends_with("dabc"));  // Should return false, not panic
+    }
+        
     
     #[test]
     fn test_feature_analysis_printing() {
@@ -3406,6 +3544,18 @@ mod tests {
     
 }  // End of Tests
 
+
+fn inspect_csv(path: &str) -> io::Result<()> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    
+    // Read first few lines
+    for (i, line) in reader.lines().take(5).enumerate() {
+        println!("Line {}: {:?}", i, line?);
+    }
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
     
     // // config
@@ -3419,6 +3569,19 @@ fn main() -> io::Result<()> {
     ensure_directories()?;
     
     let mut stemmer = PorterStemmer::new();
+
+
+    ///////////////
+    // Single Path
+    ///////////////
+    // let single_file_input_path = "file_targets/corpus.csv";
+    let single_file_input_path = "file_targets/mini.csv";  // thread 'main' panicked at src/main.rs:2606:18:, attempt to subtract with overflow
+    let text_field_index_for_inputpath:usize = 2;
+    
+    // Inspect CSV before processing
+    println!("Inspecting .csv structure:");
+    inspect_csv(single_file_input_path)?;    
+    
     
     //////////////////
     // 1. single word
@@ -3501,15 +3664,16 @@ fn main() -> io::Result<()> {
     ////////////////////////////////
     // 5. Two Phase .csv ~tokenizer
     ////////////////////////////////
-    let input_path = "file_targets/corpus.csv";
+    // let single_file_input_path = "file_targets/corpus.csv";
+    // let single_file_input_path = "file_targets/train.csv";  // thread 'main' panicked at src/main.rs:2606:18:, attempt to subtract with overflow
     let tokenizer_dict_path = "output/tokenizer_dict.json";
     let bow_matrix_path = "output/bow_matrix.csv";
 
     // First sweep: Collect stems
     let mut tokenizer_dict = TokenizerDict::new();
     tokenizer_dict.first_sweep(
-        input_path, // input_path
-        0, // corpus text column index
+        single_file_input_path, // single_file_input_path
+        text_field_index_for_inputpath, // corpus text column index
         )?;
     
     // Save tokenizer dictionary
@@ -3520,23 +3684,24 @@ fn main() -> io::Result<()> {
 
     // Second sweep: Create BOW matrix
     loaded_dict.second_sweep(
-        input_path, // input path
+        single_file_input_path, // input path
         bow_matrix_path, // output path
-        0, // corpus text column index
+        text_field_index_for_inputpath, // corpus text column index
     )?;
 
     ////////////////////////////////////////////////
     // 5.2 Stopworks with Two Phase .csv ~tokenizer
     //////////////////////?????????????????/////////
-    let input_path = "file_targets/corpus.csv";
+    // let single_file_input_path = "file_targets/corpus.csv";
+    // let single_file_input_path = "file_targets/train.csv";  // thread 'main' panicked at src/main.rs:2606:18:, attempt to subtract with overflow
     let tokenizer_dict_path = "output/tokenizer_dict.json";
     let bow_matrix_path = "output/bow_matrix.csv";
 
     // First sweep with stopword filtering
     let mut tokenizer_dict = TokenizerDict::new();
     tokenizer_dict.first_sweep_with_stopwords(
-        input_path,
-        0, // corpus text column index
+        single_file_input_path,
+        text_field_index_for_inputpath, // corpus text column index
     )?;
     
     // Save tokenizer dictionary
@@ -3547,9 +3712,9 @@ fn main() -> io::Result<()> {
 
     // Second sweep: Create BOW matrix
     loaded_dict.second_sweep(
-        input_path, // input path
+        single_file_input_path, // input path
         bow_matrix_path, // output path
-        0, // corpus text column index
+        text_field_index_for_inputpath, // corpus text column index
     )?;    
     
     
@@ -3561,6 +3726,7 @@ fn main() -> io::Result<()> {
         "file_targets/corpus.csv".to_string(),
         "file_targets/corpus2.csv".to_string(),
         "file_targets/corpus3.csv".to_string(),
+        
     ];
     
     let output_dir = "output/multiple_files";
@@ -3581,9 +3747,9 @@ fn main() -> io::Result<()> {
     let tokenizer_dict = TokenizerDict::load_from_json(tokenizer_dict_path)?;
 
     tokenizer_dict.second_sweep_with_tfidf(
-        input_path,
+        single_file_input_path,
         "output/bow_matrix_with_tfidf.csv",
-        0, // text column index
+        text_field_index_for_inputpath, // text column index
     )?;
     
     
