@@ -496,6 +496,7 @@ use std::collections::{
     HashSet,
 };
 use std::sync::Mutex;
+// use std::slice::range;
 use std::path::Path;
 use std::error::Error;
 use std::fmt;
@@ -1412,6 +1413,9 @@ pub fn print_feature_analysis(
         println!("{:-<80}", "");
     }
 }
+
+
+
 
 /// Represents the correlation statistics for a single feature
 #[derive(Debug, Clone)]
@@ -2962,6 +2966,406 @@ impl PorterStemmer {
     }
 }
 
+
+/// Represents a feature's correlation analysis with both raw and normalized scores
+#[derive(Debug, Clone)]
+pub struct NormalizedFeatureAnalysis {
+    /// Token or byte value being analyzed
+    pub token: String,
+    
+    /// Index of feature in the original feature matrix
+    pub feature_index: usize,
+    
+    // Raw (unnormalized) correlation scores
+    /// Chi-square test statistic (raw)
+    pub raw_chi_square: f64,
+    /// Mutual information score (raw)
+    pub raw_mutual_info: f64,
+    /// Logistic regression coefficient (raw)
+    pub raw_logistic_coef: f64,
+    
+    // Normalized scores (0 to 1 scale)
+    /// Normalized chi-square score
+    pub norm_chi_square: f64,
+    /// Normalized mutual information score
+    pub norm_mutual_info: f64,
+    /// Normalized logistic regression coefficient
+    pub norm_logistic_coef: f64,
+    
+    // Combined metrics
+    /// Combined weighted correlation score (average of normalized scores)
+    pub weighted_correlation: f64,
+    /// Direction of correlation: 1 (positive), -1 (negative), 0 (neutral)
+    pub correlation_direction: i8,
+}
+
+impl NormalizedFeatureAnalysis {
+    /// Normalizes a vector of scores to the range [0, 1]
+    /// 
+    /// # Arguments
+    /// * `scores` - Vector of raw scores to normalize
+    /// 
+    /// # Returns
+    /// * Vector of normalized scores in range [0, 1]
+    /// 
+    /// # Notes
+    /// Uses min-max normalization: (x - min) / (max - min)
+    /// Returns zeros if all scores are identical
+    fn normalize_scores(scores: &[f64]) -> Vec<f64> {
+        if scores.is_empty() {
+            return Vec::new();
+        }
+        
+        let min = scores.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max = scores.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        
+        // Add small epsilon to prevent division by zero
+        let epsilon = f64::EPSILON * 100.0;  // Slightly larger epsilon for numerical stability
+        let range = (max - min) + epsilon;
+        
+        scores.iter()
+            .map(|&x| {
+                if range < epsilon {
+                    0.0
+                } else {
+                    ((x - min) / range).max(0.0).min(1.0)
+                }
+            })
+            .collect()
+    }
+        
+    
+    
+    // fn normalize_scores(scores: &[f64]) -> Vec<f64> {
+    //     if scores.is_empty() {
+    //         return Vec::new();
+    //     }
+        
+    //     // Find min and max values
+    //     let min = scores.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    //     let max = scores.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        
+    //     // Check for division by zero case
+    //     if (max - min).abs() < f64::EPSILON {
+    //         return vec![0.0; scores.len()];
+    //     }
+        
+    //     // // Perform min-max normalization
+    //     // scores.iter()
+    //     //     .map(|&x| (x - min) / (max - min))
+    //     //     .collect()
+        
+    //     scores.iter()
+    //         .map(|&x| {
+    //             if range < f64::EPSILON {
+    //                 0.0
+    //             } else {
+    //                 // Apply softmax-like normalization
+    //                 ((x - min) / range).max(0.0).min(1.0)
+    //             }
+    //         })
+    //         .collect()
+    // }
+
+    // /// Determines the direction of correlation based on normalized scores
+    // /// 
+    // /// # Returns
+    // /// * 1 for positive correlation (above threshold)
+    // /// * -1 for negative correlation (below inverse threshold)
+    // /// * 0 for neutral/uncertain correlation
+    // fn determine_direction(&self) -> i8 {
+    //     // Configurable threshold for determining correlation direction
+    //     let threshold = 0.6;
+        
+    //     // Calculate average normalized score
+    //     let avg_score = (self.norm_chi_square + 
+    //                     self.norm_mutual_info + 
+    //                     self.norm_logistic_coef) / 3.0;
+        
+    //     // Determine direction based on threshold
+    //     if avg_score > threshold {
+    //         1  // Strong positive correlation
+    //     } else if avg_score < (1.0 - threshold) {
+    //         -1  // Strong negative correlation
+    //     } else {
+    //         0  // Neutral or uncertain correlation
+    //     }
+    // }
+    
+    /// Calculates weighted correlation score with configurable weights
+    fn calculate_weighted_score(&self) -> f64 {
+        // Define weights for each metric
+        const CHI_SQUARE_WEIGHT: f64 = 0.4;
+        const MUTUAL_INFO_WEIGHT: f64 = 0.4;
+        const LOGISTIC_WEIGHT: f64 = 0.2;
+        
+        (self.norm_chi_square * CHI_SQUARE_WEIGHT +
+         self.norm_mutual_info * MUTUAL_INFO_WEIGHT +
+         self.norm_logistic_coef * LOGISTIC_WEIGHT)
+    }
+    
+    /// Determines if the feature's correlation is statistically significant
+    pub fn is_significant(&self, significance_threshold: f64) -> bool {
+        // Check if any metric shows significant correlation
+        self.raw_chi_square > significance_threshold ||
+        self.raw_mutual_info > significance_threshold ||
+        self.raw_logistic_coef > significance_threshold
+    }
+
+    /// Determines correlation direction with significance check
+    fn determine_direction(&self) -> i8 {
+        const SIGNIFICANCE_THRESHOLD: f64 = 0.05;  // Standard statistical significance
+        const CORRELATION_THRESHOLD: f64 = 0.6;    // Strength threshold
+        
+        if !self.is_significant(SIGNIFICANCE_THRESHOLD) {
+            return 0;  // Not significant
+        }
+        
+        let avg_score = self.calculate_weighted_score();
+        
+        if avg_score > CORRELATION_THRESHOLD {
+            1
+        } else if avg_score < (1.0 - CORRELATION_THRESHOLD) {
+            -1
+        } else {
+            0
+        }
+    }
+}
+
+/// Performs normalized feature correlation analysis on bag-of-words matrix
+/// 
+/// # Arguments
+/// * `bow_matrix` - Document-term matrix
+/// * `labels` - Vector of class labels
+/// * `stem_dictionary` - Optional dictionary mapping feature indices to tokens
+/// 
+/// # Returns
+/// * Vector of NormalizedFeatureAnalysis results sorted by correlation strength
+pub fn analyze_feature_correlations_normalized(
+    bow_matrix: &Array2<f64>,
+    labels: &[usize],
+    stem_dictionary: Option<&[String]>,
+) -> Result<Vec<NormalizedFeatureAnalysis>, FeatureSelectionError> {
+    // Validate input dimensions
+    if bow_matrix.is_empty() || labels.is_empty() {
+        return Err(FeatureSelectionError::EmptyInput);
+    }
+    if bow_matrix.nrows() != labels.len() {
+        return Err(FeatureSelectionError::DimensionMismatch);
+    }
+
+    let num_features = bow_matrix.ncols();
+
+    // Calculate raw correlation scores
+    let chi_square_scores = calculate_chi_square_scores(bow_matrix, labels)?;
+    let mutual_info_scores = calculate_mutual_information_scores(bow_matrix, labels)?;
+    let logistic_scores = calculate_logistic_regression_scores(bow_matrix, labels)?;
+
+    // Normalize all scores to [0, 1] range
+    let chi_square_norm = NormalizedFeatureAnalysis::normalize_scores(&chi_square_scores);
+    let mutual_info_norm = NormalizedFeatureAnalysis::normalize_scores(&mutual_info_scores);
+    let logistic_norm = NormalizedFeatureAnalysis::normalize_scores(&logistic_scores);
+
+    // Create normalized analysis results
+    let mut normalized_results = Vec::with_capacity(num_features);
+    for i in 0..num_features {
+        let mut analysis = NormalizedFeatureAnalysis {
+            // Get token name from dictionary or generate default
+            token: stem_dictionary.map_or_else(
+                || format!("feature_{}", i),
+                |dict| dict[i].clone()
+            ),
+            feature_index: i,
+            
+            // Store raw scores
+            raw_chi_square: chi_square_scores[i],
+            raw_mutual_info: mutual_info_scores[i],
+            raw_logistic_coef: logistic_scores[i],
+            
+            // Store normalized scores
+            norm_chi_square: chi_square_norm[i],
+            norm_mutual_info: mutual_info_norm[i],
+            norm_logistic_coef: logistic_norm[i],
+            
+            // // Calculate combined score
+            // weighted_correlation: (chi_square_norm[i] + 
+            //                      mutual_info_norm[i] + 
+            //                      logistic_norm[i]) / 3.0,
+            // correlation_direction: 0,  // Will be set below
+            
+            weighted_correlation: 0.0,  // will be set below
+            correlation_direction: 0,   // will be set below
+        };
+        
+        // Calculate weighted score
+        analysis.weighted_correlation = analysis.calculate_weighted_score();
+        analysis.correlation_direction = analysis.determine_direction();
+        
+        // Calculate direction based on normalized scores
+        analysis.correlation_direction = analysis.determine_direction();
+        
+        normalized_results.push(analysis);
+    }
+
+    // Sort by weighted correlation strength
+    normalized_results.sort_by(|a, b| b.weighted_correlation
+        .partial_cmp(&a.weighted_correlation)
+        .unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(normalized_results)
+}
+
+/// Classifier using normalized feature correlations
+pub struct ByteClassifier {
+    /// Analyzed features with correlation scores
+    features: Vec<NormalizedFeatureAnalysis>,
+    /// Classification threshold
+    threshold: f64,
+}
+
+impl ByteClassifier {
+    /// Creates a new ByteClassifier with specified threshold
+    /// 
+    /// # Arguments
+    /// * `threshold` - Classification threshold (typically 1.0)
+    pub fn new(threshold: f64) -> Self {
+        Self {
+            features: Vec::new(),
+            threshold,
+        }
+    }
+
+    /// Classifies a document based on correlation scores
+    /// 
+    /// # Arguments
+    /// * `document` - Text to classify
+    /// 
+    /// # Returns
+    /// * `true` if document meets classification threshold
+    /// * `false` otherwise
+    pub fn classify(&self, document: &str) -> bool {
+        let score = self.calculate_document_score(document);
+        score >= self.threshold
+    }
+
+    /// Calculates correlation score for a document
+    /// 
+    /// # Arguments
+    /// * `document` - Text to analyze
+    /// 
+    /// # Returns
+    /// * Combined correlation score for the document
+    fn calculate_document_score(&self, document: &str) -> f64 {
+        let mut score = 0.0;
+        
+        // Sum weighted correlations for each matching feature
+        for feature in &self.features {
+            if document.contains(&feature.token) {
+                // Add or subtract based on correlation direction
+                score += feature.weighted_correlation * 
+                        (feature.correlation_direction as f64);
+            }
+        }
+        
+        score
+    }
+}
+
+// /// Helper function to print normalized analysis results
+// pub fn print_normalized_analysis(
+//     results: &[NormalizedFeatureAnalysis],
+//     top_n: Option<usize>
+// ) {
+//     let n = top_n.unwrap_or(results.len());
+//     println!("\nTop {} Features by Normalized Correlation:", n);
+//     println!("{:-<80}", "");
+
+//     for (i, result) in results.iter().take(n).enumerate() {
+//         println!("{}. Token: {}", i + 1, result.token);
+//         println!("   Raw Scores:");
+//         println!("      Chi-Square: {:.4}", result.raw_chi_square);
+//         println!("      Mutual Info: {:.4}", result.raw_mutual_info);
+//         println!("      Logistic Coef: {:.4}", result.raw_logistic_coef);
+//         println!("   Normalized Scores:");
+//         println!("      Chi-Square: {:.4}", result.norm_chi_square);
+//         println!("      Mutual Info: {:.4}", result.norm_mutual_info);
+//         println!("      Logistic Coef: {:.4}", result.norm_logistic_coef);
+//         println!("   Combined Score: {:.4}", result.weighted_correlation);
+//         println!("   Correlation Direction: {}", result.correlation_direction);
+//         println!("{:-<80}", "");
+//     }
+// }
+
+pub fn print_normalized_analysis(
+    results: &[NormalizedFeatureAnalysis],
+    top_n: Option<usize>
+) {
+    let n = top_n.unwrap_or(results.len());
+    println!("\nTop {} Features by Normalized Correlation:", n);
+    println!("{:-<80}", "");
+
+    for (i, result) in results.iter().take(n).enumerate() {
+        println!("{}. Token: {} (Index: {})", i + 1, result.token, result.feature_index);
+        println!("   Raw Scores:");
+        println!("      Chi-Square: {:.4} (p-value: {:.4})", 
+                result.raw_chi_square, 
+                calculate_p_value(result.raw_chi_square, 1));
+        println!("      Mutual Info: {:.4}", result.raw_mutual_info);
+        println!("      Logistic Coef: {:.4}", result.raw_logistic_coef);
+        println!("   Normalized Scores:");
+        println!("      Chi-Square: {:.4}", result.norm_chi_square);
+        println!("      Mutual Info: {:.4}", result.norm_mutual_info);
+        println!("      Logistic Coef: {:.4}", result.norm_logistic_coef);
+        println!("   Weighted Score: {:.4}", result.weighted_correlation);
+        println!("   Correlation Direction: {} ({})", 
+                result.correlation_direction,
+                match result.correlation_direction {
+                    1 => "Positive",
+                    -1 => "Negative",
+                    0 => "Neutral/Insignificant",
+                    _ => "Unknown"
+                });
+        println!("   Significant: {}", result.is_significant(0.05));
+        println!("{:-<80}", "");
+    }
+}
+
+/*
+fn main() -> io::Result<()> {
+    // Example data
+    let bow_matrix = arr2(&[
+        [1.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ]);
+    let labels = vec![0, 1, 0, 1];
+    let stem_dictionary = vec![
+        "first".to_string(),
+        "second".to_string(),
+        "third".to_string(),
+    ];
+
+    // Perform normalized analysis
+    let analysis_results = analyze_feature_correlations_normalized(
+        &bow_matrix,
+        &labels,
+        Some(&stem_dictionary)
+    )?;
+
+    // Print results
+    print_normalized_analysis(&analysis_results, Some(3));
+
+    // Create classifier
+    let classifier = ByteClassifier::new(1.0);
+    
+    Ok(())
+}
+*/
+
+
+
 // Test with bash: Cargo Test
 #[cfg(test)]
 mod tests {
@@ -3558,218 +3962,318 @@ fn inspect_csv(path: &str) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
     
-    // // config
-    // // Stopwords option
-    // let config = TokenizerConfig {
-    //     remove_stopwords: true,
-    //     text_column: 0,
-    // };
+    // // // config
+    // // // Stopwords option
+    // // let config = TokenizerConfig {
+    // //     remove_stopwords: true,
+    // //     text_column: 0,
+    // // };
     
-    // Ensure directories exist
-    ensure_directories()?;
+    // // Ensure directories exist
+    // ensure_directories()?;
     
-    let mut stemmer = PorterStemmer::new();
+    // let mut stemmer = PorterStemmer::new();
 
 
-    ///////////////
-    // Single Path
-    ///////////////
-    // let single_file_input_path = "file_targets/corpus.csv";
-    let single_file_input_path = "file_targets/mini.csv";  // thread 'main' panicked at src/main.rs:2606:18:, attempt to subtract with overflow
-    let text_field_index_for_inputpath:usize = 2;
+    // ///////////////
+    // // Single Path
+    // ///////////////
+    // // let single_file_input_path = "file_targets/corpus.csv";
+    // let single_file_input_path = "file_targets/mini.csv";  // thread 'main' panicked at src/main.rs:2606:18:, attempt to subtract with overflow
+    // let text_field_index_for_inputpath:usize = 2;
     
-    // Inspect CSV before processing
-    println!("Inspecting .csv structure:");
-    inspect_csv(single_file_input_path)?;    
+    // // Inspect CSV before processing
+    // println!("Inspecting .csv structure:");
+    // inspect_csv(single_file_input_path)?;    
     
     
-    //////////////////
-    // 1. single word
-    //////////////////
-    print!("1. single word\n");
-    let stemmed = stemmer.stem("running");
-    println!("stemmed = stemmer.stem('running'): {}\n", stemmed); // Outputs: "run"
+    // //////////////////
+    // // 1. single word
+    // //////////////////
+    // print!("1. single word\n");
+    // let stemmed = stemmer.stem("running");
+    // println!("stemmed = stemmer.stem('running'): {}\n", stemmed); // Outputs: "run"
     
-    // //////////////////////
-    // // 2. single doc string
-    // ////////////////////////
-    // // Process text directly
-    // print!("2. single doc string\n");
-    // let text = "Running and jumping through the fields!";
-    // let stemmed_text = stemmer.process_text(text);
-    // println!("Stemmed text results: {:?}\n", stemmed_text);
+    // // //////////////////////
+    // // // 2. single doc string
+    // // ////////////////////////
+    // // // Process text directly
+    // // print!("2. single doc string\n");
+    // // let text = "Running and jumping through the fields!";
+    // // let stemmed_text = stemmer.process_text(text);
+    // // println!("Stemmed text results: {:?}\n", stemmed_text);
 
-    // //////////////////////
-    // // 3. single doc file
-    // //////////////////////
-    // print!("3. single doc file\n");
-    // let stemmer = PorterStemmer::new();
+    // // //////////////////////
+    // // // 3. single doc file
+    // // //////////////////////
+    // // print!("3. single doc file\n");
+    // // let stemmer = PorterStemmer::new();
 
-    // // Process a document file
-    // let stemmed_words = stemmer.process_file_document("file_targets/test.txt")?;
-    // println!("-> Stemmed words: {:?}", stemmed_words);
+    // // // Process a document file
+    // // let stemmed_words = stemmer.process_file_document("file_targets/test.txt")?;
+    // // println!("-> Stemmed words: {:?}", stemmed_words);
     
-    // // Process with frequency counting
-    // let word_frequencies = stemmer.process_documentfile_with_frequencies("file_targets/test.txt")?;
-    // println!("-> Word frequencies: {:?}\n", word_frequencies);
+    // // // Process with frequency counting
+    // // let word_frequencies = stemmer.process_documentfile_with_frequencies("file_targets/test.txt")?;
+    // // println!("-> Word frequencies: {:?}\n", word_frequencies);
     
-    // print!("3.2 noload single doc file\n");
-    // // Process document file with streaming
-    // let stems = stemmer.noload_process_filedocument_streaming(
-    //     "file_targets/test.txt", // input path
-    //     "output/test_stems.txt",        // output path
-    //     1000, // chunk size
+    // // print!("3.2 noload single doc file\n");
+    // // // Process document file with streaming
+    // // let stems = stemmer.noload_process_filedocument_streaming(
+    // //     "file_targets/test.txt", // input path
+    // //     "output/test_stems.txt",        // output path
+    // //     1000, // chunk size
+    // // )?;
+    // // println!("-> Unique stems written to test_stems.txt");
+    // // println!("{:?}", stems);
+    
+    // // // Process with frequency counting
+    // // let frequencies = stemmer.noload_process_documentfile_frequencies_streaming(
+    // //     "file_targets/test.txt", // input path
+    // //     "output/test_stems.txt",        // output path
+    // //     "output/test_frequencies.txt",  // output path
+    // //     1000, // chunk size
+    // // )?;
+    // // println!("-> Stem frequencies written to test_frequencies.txt\n");
+    // // println!("{:?}", frequencies);
+    
+    // // ///////////////////
+    // // // 4.1 csv corpus
+    // // ///////////////////
+    // // print!("4.1 csv corpus\n");
+    // // // Process CSV and create document-term stem matrix
+    // // stemmer.process_csv_to_bow_matrix(
+    // //     "file_targets/test_csv.csv", // read this input
+    // //     "output/output_with_bow.csv",       // path to output for results
+    // //     "output/stem_dictionary.txt",       // stem-dict output
+    // //     0,                           // assuming text is in column 1
+    // // )?;
+    
+    
+    // // //////////////////////////////
+    // // // 4.2 extra-noload csv corpus
+    // // //////////////////////////////
+    // // print!("4.2 extra-noload csv corpus\n");
+    // // // Process with explicit streaming and chunk size
+    // // // Process with explicit streaming and chunk size
+    // // stemmer.noload_process_csvtobow_matrix_streaming(
+    // //     "file_targets/corpus.csv",
+    // //     "output/noload_output_with_bow.csv",
+    // //     "output/noload_stem_dictionary.txt",
+    // //     0,  // corpus text column index
+    // //     1000,
+    // // )?;
+    
+    
+    // ////////////////////////////////
+    // // 5. Two Phase .csv ~tokenizer
+    // ////////////////////////////////
+    // // let single_file_input_path = "file_targets/corpus.csv";
+    // // let single_file_input_path = "file_targets/train.csv";  // thread 'main' panicked at src/main.rs:2606:18:, attempt to subtract with overflow
+    // let tokenizer_dict_path = "output/tokenizer_dict.json";
+    // let bow_matrix_path = "output/bow_matrix.csv";
+
+    // // First sweep: Collect stems
+    // let mut tokenizer_dict = TokenizerDict::new();
+    // tokenizer_dict.first_sweep(
+    //     single_file_input_path, // single_file_input_path
+    //     text_field_index_for_inputpath, // corpus text column index
+    //     )?;
+    
+    // // Save tokenizer dictionary
+    // tokenizer_dict.save_to_json(tokenizer_dict_path)?;
+
+    // // Optional: Load dictionary (demonstrating persistence)
+    // let loaded_dict = TokenizerDict::load_from_json(tokenizer_dict_path)?;
+
+    // // Second sweep: Create BOW matrix
+    // loaded_dict.second_sweep(
+    //     single_file_input_path, // input path
+    //     bow_matrix_path, // output path
+    //     text_field_index_for_inputpath, // corpus text column index
     // )?;
-    // println!("-> Unique stems written to test_stems.txt");
-    // println!("{:?}", stems);
-    
-    // // Process with frequency counting
-    // let frequencies = stemmer.noload_process_documentfile_frequencies_streaming(
-    //     "file_targets/test.txt", // input path
-    //     "output/test_stems.txt",        // output path
-    //     "output/test_frequencies.txt",  // output path
-    //     1000, // chunk size
-    // )?;
-    // println!("-> Stem frequencies written to test_frequencies.txt\n");
-    // println!("{:?}", frequencies);
-    
-    // ///////////////////
-    // // 4.1 csv corpus
-    // ///////////////////
-    // print!("4.1 csv corpus\n");
-    // // Process CSV and create document-term stem matrix
-    // stemmer.process_csv_to_bow_matrix(
-    //     "file_targets/test_csv.csv", // read this input
-    //     "output/output_with_bow.csv",       // path to output for results
-    //     "output/stem_dictionary.txt",       // stem-dict output
-    //     0,                           // assuming text is in column 1
+
+    // ////////////////////////////////////////////////
+    // // 5.2 Stopworks with Two Phase .csv ~tokenizer
+    // //////////////////////?????????????????/////////
+    // // let single_file_input_path = "file_targets/corpus.csv";
+    // // let single_file_input_path = "file_targets/train.csv";  // thread 'main' panicked at src/main.rs:2606:18:, attempt to subtract with overflow
+    // let tokenizer_dict_path = "output/tokenizer_dict.json";
+    // let bow_matrix_path = "output/bow_matrix.csv";
+
+    // // First sweep with stopword filtering
+    // let mut tokenizer_dict = TokenizerDict::new();
+    // tokenizer_dict.first_sweep_with_stopwords(
+    //     single_file_input_path,
+    //     text_field_index_for_inputpath, // corpus text column index
     // )?;
     
-    
-    // //////////////////////////////
-    // // 4.2 extra-noload csv corpus
-    // //////////////////////////////
-    // print!("4.2 extra-noload csv corpus\n");
-    // // Process with explicit streaming and chunk size
-    // // Process with explicit streaming and chunk size
-    // stemmer.noload_process_csvtobow_matrix_streaming(
-    //     "file_targets/corpus.csv",
-    //     "output/noload_output_with_bow.csv",
-    //     "output/noload_stem_dictionary.txt",
-    //     0,  // corpus text column index
-    //     1000,
-    // )?;
+    // // Save tokenizer dictionary
+    // tokenizer_dict.save_to_json(tokenizer_dict_path)?;
+
+    // // Optional: Load dictionary (demonstrating persistence)
+    // let loaded_dict = TokenizerDict::load_from_json(tokenizer_dict_path)?;
+
+    // // Second sweep: Create BOW matrix
+    // loaded_dict.second_sweep(
+    //     single_file_input_path, // input path
+    //     bow_matrix_path, // output path
+    //     text_field_index_for_inputpath, // corpus text column index
+    // )?;    
     
     
-    ////////////////////////////////
-    // 5. Two Phase .csv ~tokenizer
-    ////////////////////////////////
-    // let single_file_input_path = "file_targets/corpus.csv";
-    // let single_file_input_path = "file_targets/train.csv";  // thread 'main' panicked at src/main.rs:2606:18:, attempt to subtract with overflow
-    let tokenizer_dict_path = "output/tokenizer_dict.json";
-    let bow_matrix_path = "output/bow_matrix.csv";
-
-    // First sweep: Collect stems
-    let mut tokenizer_dict = TokenizerDict::new();
-    tokenizer_dict.first_sweep(
-        single_file_input_path, // single_file_input_path
-        text_field_index_for_inputpath, // corpus text column index
-        )?;
-    
-    // Save tokenizer dictionary
-    tokenizer_dict.save_to_json(tokenizer_dict_path)?;
-
-    // Optional: Load dictionary (demonstrating persistence)
-    let loaded_dict = TokenizerDict::load_from_json(tokenizer_dict_path)?;
-
-    // Second sweep: Create BOW matrix
-    loaded_dict.second_sweep(
-        single_file_input_path, // input path
-        bow_matrix_path, // output path
-        text_field_index_for_inputpath, // corpus text column index
-    )?;
-
-    ////////////////////////////////////////////////
-    // 5.2 Stopworks with Two Phase .csv ~tokenizer
-    //////////////////////?????????????????/////////
-    // let single_file_input_path = "file_targets/corpus.csv";
-    // let single_file_input_path = "file_targets/train.csv";  // thread 'main' panicked at src/main.rs:2606:18:, attempt to subtract with overflow
-    let tokenizer_dict_path = "output/tokenizer_dict.json";
-    let bow_matrix_path = "output/bow_matrix.csv";
-
-    // First sweep with stopword filtering
-    let mut tokenizer_dict = TokenizerDict::new();
-    tokenizer_dict.first_sweep_with_stopwords(
-        single_file_input_path,
-        text_field_index_for_inputpath, // corpus text column index
-    )?;
-    
-    // Save tokenizer dictionary
-    tokenizer_dict.save_to_json(tokenizer_dict_path)?;
-
-    // Optional: Load dictionary (demonstrating persistence)
-    let loaded_dict = TokenizerDict::load_from_json(tokenizer_dict_path)?;
-
-    // Second sweep: Create BOW matrix
-    loaded_dict.second_sweep(
-        single_file_input_path, // input path
-        bow_matrix_path, // output path
-        text_field_index_for_inputpath, // corpus text column index
-    )?;    
-    
-    
-    //////////////////////////
-    // 6. Multiple .csv files
-    //////////////////////////
-    // Setup input files and output directory
-    let input_files_list = vec![
-        "file_targets/corpus.csv".to_string(),
-        "file_targets/corpus2.csv".to_string(),
-        "file_targets/corpus3.csv".to_string(),
+    // //////////////////////////
+    // // 6. Multiple .csv files
+    // //////////////////////////
+    // // Setup input files and output directory
+    // let input_files_list = vec![
+    //     "file_targets/corpus.csv".to_string(),
+    //     "file_targets/corpus2.csv".to_string(),
+    //     "file_targets/corpus3.csv".to_string(),
         
-    ];
+    // ];
     
-    let output_dir = "output/multiple_files";
+    // let output_dir = "output/multiple_files";
     
-    // Create and run the multi-file processor
-    let processor = MultiFileProcessor::new(
-        input_files_list,
-        output_dir.to_string(),
-        0,  // text column index
-    );
+    // // Create and run the multi-file processor
+    // let processor = MultiFileProcessor::new(
+    //     input_files_list,
+    //     output_dir.to_string(),
+    //     0,  // text column index
+    // );
     
-    processor.process_all_files()?;
+    // processor.process_all_files()?;
 
-    //////////////////////////
-    // 7. TF-IDF 
-    //////////////////////////
-    // Process with TF-IDF scores
-    let tokenizer_dict = TokenizerDict::load_from_json(tokenizer_dict_path)?;
+    // //////////////////////////
+    // // 7. TF-IDF 
+    // //////////////////////////
+    // // Process with TF-IDF scores
+    // let tokenizer_dict = TokenizerDict::load_from_json(tokenizer_dict_path)?;
 
-    tokenizer_dict.second_sweep_with_tfidf(
-        single_file_input_path,
-        "output/bow_matrix_with_tfidf.csv",
-        text_field_index_for_inputpath, // text column index
-    )?;
+    // tokenizer_dict.second_sweep_with_tfidf(
+    //     single_file_input_path,
+    //     "output/bow_matrix_with_tfidf.csv",
+    //     text_field_index_for_inputpath, // text column index
+    // )?;
     
     
-    /////////////////////////
-    // optional / inspection
-    /////////////////////////
-    // read the stem dictionary:
-    // Read and display the stems from the output directory
-    let stems = PorterStemmer::read_stem_dictionary(
-        "output/noload_stem_dictionary.txt", // output path
-    )?;
-    println!("Stems used in the BOW matrix:");
-    for stem in stems {
-        println!("{}", stem);
-    }
+    // /////////////////////////
+    // // optional / inspection
+    // /////////////////////////
+    // // read the stem dictionary:
+    // // Read and display the stems from the output directory
+    // let stems = PorterStemmer::read_stem_dictionary(
+    //     "output/noload_stem_dictionary.txt", // output path
+    // )?;
+    // println!("Stems used in the BOW matrix:");
+    // for stem in stems {
+    //     println!("{}", stem);
+    // }
     
     
-    ////////////////
-    // Stat Quest!!
-    ////////////////
+    // ////////////////
+    // // Stat Quest!!
+    // ////////////////
+    // // Example data
+    // let bow_matrix = arr2(&[
+    //     [1.0, 0.0, 1.0],
+    //     [0.0, 1.0, 0.0],
+    //     [1.0, 1.0, 0.0],
+    //     [0.0, 0.0, 1.0],
+    // ]);
+    // let labels = vec![0, 1, 0, 1];
+    // let stem_dictionary = vec![
+    //     "first".to_string(),
+    //     "second".to_string(),
+    //     "third".to_string(),
+    // ];
+
+    // // Perform feature selection
+    // let correlations = chi_square_feature_selection(&bow_matrix, &labels, 0.05)?;
+
+    // // Print results
+    // print_feature_correlations(&correlations, Some(3), Some(&stem_dictionary));
+
+    // // Original stemmer code...
+    // let mut stemmer = PorterStemmer::new();
+    // let stemmed = stemmer.stem("running");
+    // println!("stemmed = stemmer.stem('running'): {}\n", stemmed);
+
+
+    // //////////////////////
+    // // mutual_information
+    // //////////////////////
+    // let bow_matrix = arr2(&[
+    //     [1.0, 0.0, 1.0],
+    //     [0.0, 1.0, 0.0],
+    //     [1.0, 1.0, 0.0],
+    //     [0.0, 0.0, 1.0],
+    // ]);
+    // let labels = vec![0, 1, 0, 1];
+    // let stem_dictionary = vec![
+    //     "first".to_string(),
+    //     "second".to_string(),
+    //     "third".to_string(),
+    // ];
+
+    // // Calculate mutual information
+    // let mi_scores = calculate_mutual_information(&bow_matrix, &labels)
+    //     .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+    // // Print results
+    // print_mi_feature_importance(&mi_scores, Some(&stem_dictionary), Some(3));
+
+
+    // //////////////////////
+    // // GLM
+    // //////////////////////
+    
+    
+    // ////////////////////////////////
+    // // analyze_feature_correlations
+    // ////////////////////////////////
+    // let bow_matrix = arr2(&[
+    //     [1.0, 0.0, 1.0],
+    //     [0.0, 1.0, 0.0],
+    //     [1.0, 1.0, 0.0],
+    //     [0.0, 0.0, 1.0],
+    // ]);
+    // let labels = vec![0, 1, 0, 1];
+    // let stem_dictionary = vec![
+    //     "first".to_string(),
+    //     "second".to_string(),
+    //     "third".to_string(),
+    // ];
+
+    // let analysis_results = analyze_feature_correlations(
+    //     &bow_matrix,
+    //     &labels,
+    //     Some(&stem_dictionary)
+    // )?;
+
+    // print_feature_analysis(&analysis_results, Some(3));
+    
+    
+    // // Your analysis results
+    // let analysis_results = vec![
+    //     FeatureAnalysis {
+    //         feature_index: 0,
+    //         token: "example_token".to_string(),
+    //         chi_square_value: 0.75,
+    //         mutual_info_score: 0.45,
+    //         logistic_coef: 0.60,
+    //         combined_score: 0.60,
+    //     },
+    //     // ... more results
+    // ];
+
+    // // Generate reports
+    // analyze_and_report(analysis_results, "output/analysis")?;
+    
+    
+    ///////////////
+    // Normalized
+    ///////////////
     // Example data
     let bow_matrix = arr2(&[
         [1.0, 0.0, 1.0],
@@ -3784,87 +4288,20 @@ fn main() -> io::Result<()> {
         "third".to_string(),
     ];
 
-    // Perform feature selection
-    let correlations = chi_square_feature_selection(&bow_matrix, &labels, 0.05)?;
-
-    // Print results
-    print_feature_correlations(&correlations, Some(3), Some(&stem_dictionary));
-
-    // Original stemmer code...
-    let mut stemmer = PorterStemmer::new();
-    let stemmed = stemmer.stem("running");
-    println!("stemmed = stemmer.stem('running'): {}\n", stemmed);
-
-
-    //////////////////////
-    // mutual_information
-    //////////////////////
-    let bow_matrix = arr2(&[
-        [1.0, 0.0, 1.0],
-        [0.0, 1.0, 0.0],
-        [1.0, 1.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ]);
-    let labels = vec![0, 1, 0, 1];
-    let stem_dictionary = vec![
-        "first".to_string(),
-        "second".to_string(),
-        "third".to_string(),
-    ];
-
-    // Calculate mutual information
-    let mi_scores = calculate_mutual_information(&bow_matrix, &labels)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-    // Print results
-    print_mi_feature_importance(&mi_scores, Some(&stem_dictionary), Some(3));
-
-
-    //////////////////////
-    // GLM
-    //////////////////////
-    
-    
-    ////////////////////////////////
-    // analyze_feature_correlations
-    ////////////////////////////////
-    let bow_matrix = arr2(&[
-        [1.0, 0.0, 1.0],
-        [0.0, 1.0, 0.0],
-        [1.0, 1.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ]);
-    let labels = vec![0, 1, 0, 1];
-    let stem_dictionary = vec![
-        "first".to_string(),
-        "second".to_string(),
-        "third".to_string(),
-    ];
-
-    let analysis_results = analyze_feature_correlations(
+    // Perform normalized analysis
+    let analysis_results = analyze_feature_correlations_normalized(
         &bow_matrix,
         &labels,
         Some(&stem_dictionary)
     )?;
 
-    print_feature_analysis(&analysis_results, Some(3));
-    
-    
-    // Your analysis results
-    let analysis_results = vec![
-        FeatureAnalysis {
-            feature_index: 0,
-            token: "example_token".to_string(),
-            chi_square_value: 0.75,
-            mutual_info_score: 0.45,
-            logistic_coef: 0.60,
-            combined_score: 0.60,
-        },
-        // ... more results
-    ];
+    // Print results
+    print_normalized_analysis(&analysis_results, Some(3));
 
-    // Generate reports
-    analyze_and_report(analysis_results, "output/analysis")?;
+    // Create classifier
+    let classifier = ByteClassifier::new(1.0);
+    
+    
     
     // Finis
     Ok(())
